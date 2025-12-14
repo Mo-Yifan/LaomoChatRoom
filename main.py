@@ -2,6 +2,7 @@ import sys
 import asyncio
 import websockets
 from PyQt6.QtWidgets import QApplication, QMessageBox, QInputDialog
+from PyQt6.QtCore import QSettings
 from qasync import QEventLoop, asyncSlot
 from client import ChatClient
 from login_ui import LoginWindow
@@ -69,6 +70,16 @@ class ClientApp:
                     result.get("reason", "用户名或密码错误")
                 )
                 return
+
+            # 保存账号到本地历史（去重 + 最多保留10个）
+            settings = QSettings("MyChatApp", "LoginHistory")
+            history = settings.value("usernames", [], type=list)
+            if self.username in history:
+                history.remove(self.username)
+            history.insert(0, self.username)
+            history = history[:10]  # 只保留最近10个
+            settings.setValue("usernames", history)
+            print(f"[DEBUG] Saved login history: {history}")
 
             # 2️⃣ 切换 UI
             QMessageBox.information(None, "成功", "登录成功！")

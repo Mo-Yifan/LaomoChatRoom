@@ -120,6 +120,10 @@ class ChatWindow(QWidget):
         label.setWordWrap(True)
         label.setFont(QFont("微软雅黑", 14))
 
+        # 设置最小宽度（例如 300px）
+        label.setMinimumWidth(300)
+        label.setMaximumWidth(800)  # 防止过宽
+
         label.setStyleSheet(f"""
             QLabel {{
                 background-color: {'#d1f0ff' if is_user else 'white'};

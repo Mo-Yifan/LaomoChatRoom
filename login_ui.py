@@ -1,9 +1,9 @@
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
-    QPushButton, QGraphicsDropShadowEffect
+    QPushButton, QGraphicsDropShadowEffect, QCompleter
 )
 from PyQt6.QtGui import QFont, QColor, QCursor
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QSettings, QEvent
 import sys
 import asyncio
 
@@ -34,6 +34,18 @@ class LoginWindow(QWidget):
         layout.addWidget(title)
 
         self.username = QLineEdit()
+        # 加载历史账号
+        self.username.installEventFilter(self)  # 安装事件过滤器
+        self.settings = QSettings("MyChatApp", "LoginHistory")  # 组织名/应用名
+        history = self.settings.value("usernames", [], type=list)
+        print(f"[DEBUG] Loaded login history: {history}")
+
+        # 设置 QCompleter
+        self.completer = QCompleter(history, self)
+        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.username.setCompleter(self.completer)
+
         self.username.setPlaceholderText("用户名")
         self.username.setFixedHeight(40)
         self.username.setStyleSheet("""
@@ -99,6 +111,19 @@ class LoginWindow(QWidget):
 
         self.setLayout(layout)
 
+    def eventFilter(self, obj, event):
+        if obj == self.username:
+            if event.type() == QEvent.Type.FocusIn:
+                # 获得焦点时，如果内容为空，立即弹出全部历史
+                if not self.username.text():
+                    self.completer.setCompletionPrefix("")  # 清空前缀
+                    self.completer.complete()  # 手动弹出
+            elif event.type() == QEvent.Type.KeyPress:
+                # 可选：按 Esc 时不清空，保持体验
+                if event.key() == Qt.Key.Key_Escape:
+                    return True  # 阻止默认关闭行为（可选）
+        return super().eventFilter(obj, event)
+    
     # ------------------- 登录按钮 -------------------
     def do_login(self):
         username = self.username.text()

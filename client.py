@@ -1,110 +1,139 @@
-# client.py
+# client.py - 完全适配 websockets >=15.0 + qasync
 import asyncio
+import websockets
 import json
 import aiohttp
-import websockets
-from PyQt6.QtCore import QThread, pyqtSignal
-
-# -------------------- 接收消息线程 --------------------
-class ClientRecvThread(QThread):
-    recv_signal = pyqtSignal(dict)  # 永远只发 dict
-
-    def __init__(self, uri):
-        super().__init__()
-        self.uri = uri
-        self.ws = None
-        self.running = True
-
-    def run(self):
-        asyncio.run(self.websocket_loop())
-
-    async def websocket_loop(self):
-        try:
-            async with websockets.connect(self.uri) as websocket:
-                self.ws = websocket
-                while self.running:
-                    msg_text = await websocket.recv()   # 一定是 JSON 字符串
-
-                    # 尝试解析 JSON
-                    try:
-                        msg = json.loads(msg_text)
-                        # 成功才 emit
-                        self.recv_signal.emit(msg)
-                    except Exception as e:
-                        print(f"[客户端] JSON 解析失败: {e}, 内容: {msg_text}")
-                        # 不 emit 字符串，避免 UI 显示 JSON 原文
-                        continue
-
-        except Exception as e:
-            print(f"[客户端] 连接异常: {e}")
-
-    def stop(self):
-        self.running = False
-        if self.ws:
-            try:
-                asyncio.run(self.ws.close())
-            except RuntimeError:
-                pass
+from typing import Optional, Callable
+from websockets import State  # ← 新增：用于状态判断
 
 
-# -------------------- 客户端管理类 --------------------
 class ChatClient:
-    """基于 WebSocket 的异步客户端"""
     def __init__(self):
-        self.username = None
-        self.password = None
-        self.uri = None
-        self.recv_thread = None
-        self.recv_callback = None  # 收到消息时回调 UI
+        self.username: Optional[str] = None
+        self.password: Optional[str] = None
+        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.recv_callback: Optional[Callable[[dict], None]] = None
+        self.on_disconnect: Optional[Callable[[websockets.ConnectionClosed], None]] = None
 
-    # -------------------- 设置用户名和密码 --------------------
-    def set_credentials(self, username, password):
+    def set_credentials(self, username: str, password: str):
         self.username = username
         self.password = password
 
-    # -------------------- 注册 --------------------
-    async def register(self, host, port):
-        if not self.username or not self.password:
-            raise ValueError("请先调用 set_credentials 设置用户名和密码")
-        url = f"http://{host}:{port}/register"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json={"username": self.username, "password": self.password}) as resp:
-                return await resp.json()
+    # -----------------------------
+    # WebSocket 连接（核心：无 extra_headers）
+    # -----------------------------
+    async def connect_ws(self, host: str, port: int) -> bool:
+        ws_url = f"ws://{host}:{port}/ws"
+        try:
+            # ✅ websockets 15.x 不再需要 extra_headers
+            self.ws = await websockets.connect(ws_url)
+            print(f"[客户端] 已连接服务器: {ws_url}")
 
-    # -------------------- 登录 --------------------
-    async def login(self, host, port):
-        if not self.username or not self.password:
-            raise ValueError("请先调用 set_credentials 设置用户名和密码")
-        url = f"http://{host}:{port}/login"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json={"username": self.username, "password": self.password}) as resp:
-                return await resp.json()
+            # 🌟 发送 login 消息完成认证
+            await self.send_packet({
+                "type": "login",
+                "username": self.username,
+                "password": self.password
+            })
 
-    # -------------------- 连接 WebSocket --------------------
-    def connect_ws(self, host, port):
-        if not self.username:
-            raise ValueError("请先调用 set_credentials 设置用户名")
-        self.uri = f"ws://{host}:{port}/ws/{self.username}"
-        self.recv_thread = ClientRecvThread(self.uri)
-        if self.recv_callback:
-            self.recv_thread.recv_signal.connect(self.recv_callback)
-        self.recv_thread.start()
-        print(f"[客户端] 已启动 WebSocket 接收线程，连接到 {self.uri}")
+            # 启动接收循环（它会处理消息 + 断开）
+            asyncio.create_task(self.receive_loop())
+            return True
 
-    # -------------------- 发送群聊消息 --------------------
-    async def send_chat(self, text):
-        if self.recv_thread and self.recv_thread.ws:
-            msg = {"type": "chat", "text": text}
-            await self.recv_thread.ws.send(json.dumps(msg))
+        except Exception as e:
+            print(f"[客户端] 连接失败: {e}")
+            return False
 
-    # -------------------- 发送私聊消息 --------------------
-    async def send_private(self, to_user, text):
-        if self.recv_thread and self.recv_thread.ws:
-            msg = {"type": "private", "from": self.username, "to": to_user, "text": text}
-            await self.recv_thread.ws.send(json.dumps(msg))
+    # -----------------------------
+    # HTTP API
+    # -----------------------------
+    async def register(self, host: str, port: int) -> dict:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"http://{host}:{port}/register",
+                    json={"username": self.username, "password": self.password}
+                ) as resp:
+                    return await resp.json()
+        except Exception as e:
+            return {"status": "fail", "reason": str(e)}
 
-    # -------------------- 断开连接 --------------------
-    async def disconnect(self):
-        if self.recv_thread:
-            self.recv_thread.stop()
-            self.recv_thread = None
+    async def login(self, host: str, port: int) -> dict:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"http://{host}:{port}/login",
+                    json={"username": self.username, "password": self.password}
+                ) as resp:
+                    return await resp.json()
+        except Exception as e:
+            return {"status": "fail", "reason": str(e)}
+
+    # -----------------------------
+    # 发送
+    # -----------------------------
+    async def send_packet(self, data: dict):
+        print(f"[DEBUG] self.ws = {self.ws}")
+        print(f"[DEBUG] type(self.ws) = {type(self.ws)}")
+        if hasattr(self.ws, 'state'):
+            print(f"[DEBUG] self.ws.state = {self.ws.state} (repr: {repr(self.ws.state)})")
+        else:
+            print("[DEBUG] self.ws has no 'state' attribute!")
+
+        if not self.ws or self.ws.state != State.OPEN:
+            print("[客户端] 连接未就绪，无法发送")
+            return
+
+        raw = json.dumps(data, ensure_ascii=False)
+        print(f"[客户端] 尝试发送: {raw}")
+        try:
+            await self.ws.send(raw)
+            print("[客户端] 发送完成（无异常）")
+        except Exception as e:
+            print(f"[客户端] 发送失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+    async def send_group(self, text: str):
+        if text.strip():
+            await self.send_packet({"type": "group", "text": text})
+
+    async def send_private(self, to_user: str, text: str):
+        if to_user and to_user != self.username and text.strip():
+            await self.send_packet({"type": "private", "to": to_user, "text": text})
+
+    # -----------------------------
+    # 接收循环（监听关闭事件）
+    # -----------------------------
+    async def receive_loop(self):
+        if not self.ws:
+            return
+        try:
+            async for raw_data in self.ws:
+                try:
+                    msg = json.loads(raw_data)
+                    if self.recv_callback:
+                        self.recv_callback(msg)
+                except json.JSONDecodeError:
+                    print(f"[客户端] 无效 JSON: {raw_data}")
+        except websockets.ConnectionClosed as e:
+            print(f"[客户端] 连接关闭: {e.code} - {e.reason}")
+            # 🌟 触发断开回调
+            if self.on_disconnect:
+                try:
+                    self.on_disconnect(e)
+                except Exception as exc:
+                    print(f"[客户端] on_disconnect 回调异常: {exc}")
+        except Exception as e:
+            print(f"[客户端] 接收异常: {e}")
+            # 非 ConnectionClosed 异常也视为断开
+            if self.on_disconnect and isinstance(e, websockets.WebSocketException):
+                self.on_disconnect(websockets.ConnectionClosed(1006, "异常断开"))
+
+    # -----------------------------
+    # 关闭（可选）
+    # -----------------------------
+    async def close(self):
+        if self.ws and self.ws.state == State.OPEN:
+            await self.ws.close()
+        self.ws = None

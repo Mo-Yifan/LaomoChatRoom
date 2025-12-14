@@ -1,11 +1,13 @@
 import sys
 import asyncio
+import websockets
 from PyQt6.QtWidgets import QApplication, QMessageBox, QInputDialog
-from qasync import QEventLoop
+from qasync import QEventLoop, asyncSlot
 from client import ChatClient
 from login_ui import LoginWindow
 from chat_ui import ChatWindow
 from register_ui import RegisterWindow
+
 
 class ClientApp:
     def __init__(self):
@@ -20,65 +22,106 @@ class ClientApp:
             sys.exit()
         self.HOST = host
         self.PORT = port
-        # ------------------------------------------------------------
 
-        # 初始化客户端
+        # ------------------- 初始化客户端和属性 -------------------
         self.client = ChatClient()
         self.username = None
+        self.password = None
+        self.running = True
+        self.chat_ui = None
 
-        # 登录界面
+        # ------------------- 登录界面 -------------------
         self.login_ui = LoginWindow()
-        # 用普通槽绑定信号，再在槽内启动异步任务
-        self.login_ui.login_request.connect(self.on_login_request)
-        self.login_ui.register_request.connect(self.on_register_request)
+        self._connect_login_signals()
         self.login_ui.show()
 
-        # 注册界面
+        # ------------------- 注册界面 -------------------
         self.register_ui = RegisterWindow()
         self.register_ui.register_request.connect(self.on_register_request)
 
-        # 聊天界面
-        self.chat_ui = None
+    # ------------------- 延迟绑定槽函数 -------------------
+    def _connect_login_signals(self):
+        self.on_login_request = asyncSlot(str, str)(self.on_login_request)
+        self.on_register_request = asyncSlot(str, str)(self.on_register_request)
+        self.login_ui.login_request.connect(self.on_login_request)
+        self.login_ui.register_request.connect(self.on_register_request)
 
-    # ------------------- 登录槽 -------------------
-    def on_login_request(self, username, password):
+    # ============================================================
+    # 登录按钮回调
+    # ============================================================
+    async def on_login_request(self, username: str, password: str):
         self.username = username
+        self.password = password
         self.client.set_credentials(username, password)
-        # 在事件循环中执行异步登录
-        asyncio.create_task(self.async_login())
+        await self.async_login()
 
+    # ============================================================
+    # 异步登录（核心修复：移除轮询，改用 on_disconnect）
+    # ============================================================
+    @asyncSlot()
     async def async_login(self):
         try:
+            # 1️⃣ HTTP 登录
             result = await self.client.login(self.HOST, self.PORT)
-            if result.get("status") == "ok":
-                QMessageBox.information(None, "成功", "登录成功！")
-                self.login_ui.close()
+            if result.get("status") != "ok":
+                QMessageBox.warning(
+                    None, "错误",
+                    result.get("reason", "用户名或密码错误")
+                )
+                return
 
-                # 建立 WebSocket 收消息线程
-                self.client.connect_ws(self.HOST, self.PORT)
-                if self.client.recv_thread:
-                    self.client.recv_thread.recv_signal.connect(self.on_server_msg)
+            # 2️⃣ 切换 UI
+            QMessageBox.information(None, "成功", "登录成功！")
+            self.login_ui.close()
 
-                # 打开聊天界面
-                self.chat_ui = ChatWindow(self.username)
-                # 将 ChatWindow 的 handle_server_message 注册给客户端的回调
-                self.client.recv_callback = self.chat_ui.handle_server_message
-                # 将 send_msg 信号绑定到客户端发送方法
-                self.chat_ui.send_msg.connect(lambda msg: asyncio.create_task(
-                    self.client.send_chat(msg['text']) if msg['type']=='chat' else self.client.send_private(msg['to'], msg['text'])
-                ))
-                self.chat_ui.show()
+            self.chat_ui = ChatWindow(self.username)
+            self.client.recv_callback = self.on_server_msg
+            self.client.on_disconnect = self.on_ws_disconnect  # ← 关键：注册断开回调
+            self.chat_ui.send_msg.connect(self.dispatch_send_message)
+            self.chat_ui.show()
 
-            else:
-                QMessageBox.warning(None, "错误", result.get("reason", "用户名或密码错误"))
+            # 3️⃣ 连接 WebSocket（含 login 认证）
+            success = await self.client.connect_ws(self.HOST, self.PORT)
+            if not success:
+                QMessageBox.critical(None, "连接失败", "无法连接 WebSocket 服务器")
+                self.chat_ui.close()
+                self.login_ui.show()
+                return
+
+            # 🌟 不再轮询！等待连接自然断开（receive_loop 会触发 on_disconnect）
+            # 主协程不阻塞，由 receive_loop + on_disconnect 驱动生命周期
+
         except Exception as e:
-            QMessageBox.critical(None, "错误", f"登录异常: {e}")
+            QMessageBox.critical(None, "登录异常", f"{type(e).__name__}: {e}")
+            if self.chat_ui and self.chat_ui.isVisible():
+                self.chat_ui.close()
+            if not self.login_ui.isVisible():
+                self.login_ui.show()
 
-    # ------------------- 注册槽 -------------------
-    def on_register_request(self, username, password):
+    # ============================================================
+    # WebSocket 断开回调（线程安全）
+    # ============================================================
+    def on_ws_disconnect(self, exc: websockets.ConnectionClosed):
+        # 使用 call_soon_threadsafe 确保在主线程执行 UI 操作
+        asyncio.get_event_loop().call_soon_threadsafe(self._handle_disconnect, exc)
+
+    def _handle_disconnect(self, exc):
+        if not self.running:
+            return
+        reason = exc.reason or f"代码 {exc.code}"
+        QMessageBox.information(None, "连接断开", f"与服务器断开: {reason}")
+        if self.chat_ui:
+            self.chat_ui.close()
+        self.login_ui.show()
+
+    # ============================================================
+    # 注册
+    # ============================================================
+    async def on_register_request(self, username: str, password: str):
         self.client.set_credentials(username, password)
-        asyncio.create_task(self.async_register())
+        await self.async_register()
 
+    @asyncSlot()
     async def async_register(self):
         try:
             result = await self.client.register(self.HOST, self.PORT)
@@ -89,26 +132,43 @@ class ClientApp:
         except Exception as e:
             QMessageBox.critical(None, "错误", f"注册异常: {e}")
 
-    # ------------------- 接收服务器消息 -------------------
-    def on_server_msg(self, msg):
-        if not self.chat_ui:
-            return
-        msg_type = msg.get("type")
-        if msg_type == "chat":
-            is_user = msg.get("from") == self.username
-            text = msg.get("text", "")
-            self.chat_ui.add_message(f"[群聊] {msg.get('from')}: {text}", is_user=is_user)
-        elif msg_type == "private":
-            is_user = msg.get("from") == self.username
-            text = msg.get("text", "")
-            self.chat_ui.add_message(f"[私聊] {msg.get('from')} -> 你: {text}", is_user=is_user)
+    # ============================================================
+    # 消息分发
+    # ============================================================
+    def dispatch_send_message(self, msg):
+        if msg["type"] == "private":
+            asyncio.create_task(self.client.send_private(msg["to"], msg["text"]))
+        elif msg["type"] == "group":
+            asyncio.create_task(self.client.send_group(msg["text"]))
 
-    # ------------------- 启动应用 -------------------
+    # ============================================================
+    # 消息接收处理（UI 更新）
+    # ============================================================
+    def on_server_msg(self, msg):
+        if self.chat_ui:
+            self.chat_ui.handle_server_message(msg)
+
+    # ============================================================
+    # 启动（强化 loop 策略）
+    # ============================================================
     def run(self):
-        loop = QEventLoop(self.app)
+        import asyncio
+        import sys
+
+        if sys.platform == "win32":
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+        loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        with loop:
-            loop.run_forever()
+
+        qloop = QEventLoop(self.app, loop)
+        asyncio.set_event_loop(qloop)
+
+        try:
+            qloop.run_forever()
+        finally:
+            qloop.close()
+
 
 if __name__ == "__main__":
     ClientApp().run()

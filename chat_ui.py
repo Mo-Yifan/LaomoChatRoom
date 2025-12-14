@@ -1,27 +1,28 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
-    QPushButton, QLabel, QLineEdit
+    QPushButton, QLabel, QLineEdit, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
+from datetime import datetime
 
 
 class ChatWindow(QWidget):
-    send_msg = pyqtSignal(dict)  # 信号：发送消息给主程序处理网络
+    send_msg = pyqtSignal(dict)  # 发送到主程序（主线程→网络线程）
 
     def __init__(self, username):
         super().__init__()
 
         self.username = username
-        self.setWindowTitle(f"精美聊天界面 - {username}")
+        self.setWindowTitle(f"老莫聊天室：当前用户 - {username}")
         self.resize(600, 500)
 
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(10, 10, 10, 10)
 
-        # 消息显示区
+        # ====== 消息显示区 ======
         self.chat_area = QVBoxLayout()
-        self.chat_area.addStretch()  # 用于让消息顶在上方
+        self.chat_area.addStretch()
 
         scroll_widget = QWidget()
         scroll_widget.setLayout(self.chat_area)
@@ -33,11 +34,11 @@ class ChatWindow(QWidget):
 
         main_layout.addWidget(scroll)
 
-        # 输入框 + 发送按钮
+        # ====== 输入栏 ======
         bottom = QHBoxLayout()
 
         self.input = QLineEdit()
-        self.input.setPlaceholderText("输入消息... (群聊直接输入，私聊格式 @username 消息)")
+        self.input.setPlaceholderText("输入消息...(群聊直接输入，私聊 @用户 内容)")
         self.input.setFixedHeight(40)
         self.input.setStyleSheet("""
             QLineEdit {
@@ -62,7 +63,6 @@ class ChatWindow(QWidget):
                 background-color: #2980b9;
             }
         """)
-
         send_btn.clicked.connect(self.send_message)
 
         bottom.addWidget(self.input)
@@ -71,52 +71,55 @@ class ChatWindow(QWidget):
         main_layout.addLayout(bottom)
         self.setLayout(main_layout)
 
+    # =============================================================
+    # 发送消息
+    # =============================================================
     def send_message(self):
-        """将输入框内容发给主程序，由主程序发送给服务器"""
         text = self.input.text().strip()
         if not text:
             return
 
-        # 支持私聊格式：@username 内容
+        # 构造消息对象（和服务器返回的结构一致）
         if text.startswith("@") and " " in text:
             to_user, msg_text = text[1:].split(" ", 1)
-            msg = {
-                "type": "private",
-                "to": to_user.strip(),
-                "text": msg_text.strip()
-            }
-            # 检查是否发送给自己
+            to_user = to_user.strip()
+            msg_text = msg_text.strip()
             if to_user == self.username:
-                from PyQt6.QtWidgets import QMessageBox
                 QMessageBox.warning(self, "无效私聊", "不能给自己发送私聊消息")
-                return  # 不发送消息到服务器
-
+                return
             msg = {
                 "type": "private",
+                "from": self.username,
                 "to": to_user,
-                "text": msg_text
+                "text": msg_text,
+                "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
             }
         else:
             msg = {
-                "type": "chat",
-                "text": text
+                "type": "group",
+                "from": self.username,
+                "to": "__GROUP__",
+                "text": text,
+                "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
             }
 
-        # 发送消息信号给主程序
+        # 发送给服务器
         self.send_msg.emit(msg)
 
-        # 立即显示自己消息
-        display_text = f"[群聊] 我: {text}" if msg["type"] == "chat" else f"[私聊] 我 -> {msg['to']}: {msg['text']}"
+        # 本地显示：使用 render_message 统一格式！
+        display_text = self.render_message(msg)
+        print(">>> 发送消息时渲染结果:", repr(display_text))
         self.add_message(display_text, is_user=True)
-
-        # 清空输入框
         self.input.clear()
 
+    # =============================================================
+    # 添加消息到 UI
+    # =============================================================
     def add_message(self, text, is_user=False):
-        """在聊天区域显示消息"""
         label = QLabel(text)
         label.setWordWrap(True)
         label.setFont(QFont("微软雅黑", 14))
+
         label.setStyleSheet(f"""
             QLabel {{
                 background-color: {'#d1f0ff' if is_user else 'white'};
@@ -134,40 +137,77 @@ class ChatWindow(QWidget):
             h.addWidget(label)
             h.addStretch()
 
-        # 插入到聊天区域倒数第一个位置（保持最下面是 stretch）
         self.chat_area.insertLayout(self.chat_area.count() - 1, h)
 
-    # ------------------- WebSocket 消息处理接口 -------------------
-    def handle_server_message(self, msg: dict):
-        """处理从服务器接收到的消息"""
+    # =============================================================
+    # 服务器推来的消息
+    # =============================================================
+    def handle_server_message(self, msg):
+        print(f"[SERVER MSG] 收到服务器消息: {msg}")
         msg_type = msg.get("type")
-        if msg_type == "chat":
-            text = f"[群聊] {msg.get('from')}: {msg.get('text')}"
-            self.add_message(text, is_user=False)
-        elif msg_type == "private":
-            text = f"[私聊] {msg.get('from')} -> 我: {msg.get('text')}"
-            self.add_message(text, is_user=False)
 
-    # ------------------- 消息渲染函数 -------------------
-    def render_message(self, msg: dict) -> str:
-        """
-        将服务器发送的 JSON 消息渲染成纯文本显示
-        支持群聊、私聊、系统消息
-        """
-        msg_type = msg.get("type")
-        
-        if msg_type == "system":
-            return f"🌐 [系统] {msg.get('text', '')}"
-        
-        elif msg_type == "chat":
-            sender = msg.get("from", "未知")
-            content = msg.get("text", "")
-            return f"[群聊] {sender}: {content}"
-        
+        if msg_type == "history":
+            print(f"[DEBUG] 收到历史消息，共 {len(msg.get('messages', []))} 条")
+            for i, m in enumerate(msg.get("messages", [])):
+                print(f"  [{i}] type={type(m)}, content={repr(m)}")
+                if isinstance(m, str):
+                    print("  ⚠️ 警告：历史消息是字符串！应该为 dict！")
+                    self.add_message(m, is_user=False)
+                else:
+                    rendered = self.render_message(m)
+                    sender = m.get("from", "")
+                    is_user = (sender == self.username)
+                    self.add_message(rendered, is_user=is_user)
+
+        elif msg_type == "group":
+            rendered = self.render_message(msg)
+            self.add_message(rendered, is_user=(msg.get("from") == self.username))
+
         elif msg_type == "private":
-            sender = msg.get("from", "未知")
-            to = msg.get("to", "你")
-            content = msg.get("text", "")
-            return f"[私聊] {sender} -> {to}: {content}"
-        
-        return f"[未知消息] {msg}"
+            rendered = self.render_message(msg)
+            self.add_message(rendered, is_user=(msg.get("from") == self.username))
+
+        elif msg_type == "system":
+            rendered = self.render_message(msg)
+            self.add_message(rendered, is_user=False)
+
+        else:
+            unknown_text = f"[未知消息类型: {msg_type}] {msg}"
+            self.add_message(unknown_text, is_user=False)
+
+    # =============================================================
+    # 渲染服务器消息（统一格式）
+    # =============================================================
+    def render_message(self, msg: dict) -> str:
+        ts_str = msg.get("timestamp", "")
+        try:
+            dt = datetime.fromisoformat(ts_str)
+        except Exception:
+            return f"[无效时间] {msg.get('text', '')}"
+
+        now = datetime.now()
+        if dt.date() == now.date():
+            display_time = dt.strftime("%H:%M:%S")
+        else:
+            display_time = dt.strftime("%Y年%m月%d日 %H:%M:%S")
+
+        msg_type = msg.get("type")
+        sender = msg.get("from", "未知")
+        content = msg.get("text", "")
+
+        if msg_type == "system":
+            event_text = msg.get('text', '') or f"{msg.get('username', '未知')} {msg.get('event', '')}"
+            return f"[{display_time}] 🌐 [系统] {event_text}"
+
+        elif msg_type == "group":
+            return f"[{display_time}] [群聊] {sender}: {content}"   # ← 注意是 display_time
+
+        elif msg_type == "private":
+            to_user = msg.get("to", "")
+            if to_user == self.username:
+                return f"[{display_time}] [私聊] {sender} → 我: {content}"
+            else:
+                return f"[{display_time}] [私聊] 我 → {to_user}: {content}"
+
+        else:
+            return f"[{display_time}] [未知] {content}"

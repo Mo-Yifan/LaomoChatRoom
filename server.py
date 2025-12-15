@@ -22,6 +22,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import random
+
+# ============================================================
+# 生成唯一用户 ID 的辅助函数
+# ============================================================
+def generate_unique_user_id(cursor, max_attempts=100):
+    """生成 10 位唯一数字 ID"""
+    for _ in range(max_attempts):
+        # 生成 10 位数字字符串（允许前导0）
+        candidate = f"{random.randint(0, 9999999999):010d}"
+        cursor.execute("SELECT 1 FROM users WHERE user_id = ?", (candidate,))
+        if cursor.fetchone() is None:
+            return candidate
+    raise RuntimeError("无法生成唯一用户ID（尝试次数过多）")
+
 # ============================================================
 # 数据库初始化
 # ============================================================
@@ -33,10 +48,25 @@ def init_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 username TEXT PRIMARY KEY,
+                user_id TEXT UNIQUE NOT NULL,
                 password TEXT NOT NULL,
                 last_online TIMESTAMP
             )
         """)
+
+        # === 新增：检查是否存在 user_id 列，若无则添加 ===
+        cursor.execute("PRAGMA table_info(users)")
+        columns = [info[1] for info in cursor.fetchall()]
+        if "user_id" not in columns:
+            print("[LOG] Adding missing column 'user_id' to users table...")
+            cursor.execute("ALTER TABLE users ADD COLUMN user_id TEXT UNIQUE")
+            # 为已有用户生成 user_id
+            cursor.execute("SELECT username FROM users WHERE user_id IS NULL")
+            for (username,) in cursor.fetchall():
+                new_id = generate_unique_user_id(cursor)
+                cursor.execute("UPDATE users SET user_id = ? WHERE username = ?", (new_id, username))
+                print(f"[LOG] Assigned user_id {new_id} to existing user {username}")
+        
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,8 +78,26 @@ def init_db():
                 delivered INTEGER DEFAULT 0
             )
         """)
+        
+        # 检查是否已有 user_id 列（简单判断：查第一条记录是否有该字段）
+        try:
+            cursor.execute("SELECT user_id FROM users LIMIT 1")
+        except sqlite3.OperationalError:
+            # 说明表没有 user_id 列，需要添加
+            cursor.execute("ALTER TABLE users ADD COLUMN user_id TEXT UNIQUE")
+            conn.commit()
+
+        # 为没有 user_id 的用户分配 ID
+        cursor.execute("SELECT username FROM users WHERE user_id IS NULL OR user_id = ''")
+        rows = cursor.fetchall()
+        for (username,) in rows:
+            new_id = generate_unique_user_id(cursor)
+            cursor.execute("UPDATE users SET user_id = ? WHERE username = ?", (new_id, username))
+            print(f"[LOG] 为老用户 {username} 分配 ID: {new_id}")
+
         conn.commit()
         conn.close()
+
         print("[LOG] init_db() succeeded: tables created or exist")
     except Exception as e:
         print(f"[LOG] init_db() failed: {e}")
@@ -59,42 +107,56 @@ init_db()
 # ============================================================
 # API：注册 / 登录（保持不变）
 # ============================================================
-def register_user(username: str, password: str) -> bool:
+def register_user(username: str, password: str) -> tuple[bool, str]:  # 返回 (成功, user_id)
     print(f"[LOG] register_user(username={username}) called")
     try:
         conn = sqlite3.connect("users.db")
         cursor = conn.cursor()
+        
+        # 生成唯一 ID
+        user_id = generate_unique_user_id(cursor)
+        
         cursor.execute(
-            "INSERT INTO users(username, password, last_online) VALUES (?, ?, ?)",
-            (username, password, None)
+            "INSERT INTO users(username, password, user_id, last_online) VALUES (?, ?, ?, ?)",
+            (username, password, user_id, None)
         )
         conn.commit()
         conn.close()
-        print(f"[LOG] register_user({username}) succeeded")
-        return True
+        print(f"[LOG] register_user({username}) succeeded, ID={user_id}")
+        return True, user_id
     except sqlite3.IntegrityError as e:
         print(f"[LOG] register_user({username}) failed: user exists")
-        return False
+        return False, ""
     except Exception as e:
         print(f"[LOG] register_user({username}) failed with error: {e}")
-        return False
+        return False, ""
 
-def check_login(username: str, password: str) -> bool:
-    print(f"[LOG] check_login(username={username}) called")
+def check_login(identifier: str, password: str) -> tuple[bool, str]:
+    """
+    identifier 可以是 username 或 user_id
+    返回 (是否成功, 实际用户名)
+    """
+    print(f"[LOG] check_login(identifier={identifier}) called")
     try:
         conn = sqlite3.connect("users.db")
         cursor = conn.cursor()
+        # 尝试按 username 或 user_id 查
         cursor.execute(
-            "SELECT * FROM users WHERE username=? AND password=?", (username, password)
+            "SELECT username FROM users WHERE (username = ? OR user_id = ?) AND password = ?",
+            (identifier, identifier, password)
         )
         result = cursor.fetchone()
         conn.close()
-        success = result is not None
-        print(f"[LOG] check_login({username}) returned: {success}")
-        return success
+        if result:
+            real_username = result[0]
+            print(f"[LOG] check_login({identifier}) succeeded → username={real_username}")
+            return True, real_username
+        else:
+            print(f"[LOG] check_login({identifier}) failed")
+            return False, ""
     except Exception as e:
-        print(f"[LOG] check_login({username}) failed: {e}")
-        return False
+        print(f"[LOG] check_login({identifier}) failed: {e}")
+        return False, ""
 
 def update_last_online(username: str, time):
     print(f"[LOG] update_last_online(username={username}, time={time}) called")
@@ -241,31 +303,37 @@ class ConnectionManager:
             print(f"[LOG] disconnect({username}) called but not active")
 
     def authenticate(self, temp_id: str, username: str, password: str) -> bool:
-        print(f"[LOG] authenticate(temp_id={temp_id}, username={username}) called")
-        # 1. 校验密码
-        if not check_login(username, password):
+        """
+        注意：这里的 `username` 实际是用户输入的「标识符」，
+        可能是真实用户名，也可能是 10 位用户 ID。
+        """
+        print(f"[LOG] authenticate(temp_id={temp_id}, identifier={username}) called")
+
+        # 1. 校验密码，并获取真实用户名
+        success, real_username = check_login(username, password)
+        if not success:
             print(f"[LOG] authenticate({username}) failed: login check failed")
             return False
 
-        # 2. 检查是否已在线 → 踢掉旧连接
-        if username in self.active_connections:
-            old_ws = self.active_connections[username]
+        # 2. 检查是否已在线 → 踢掉旧连接（使用 real_username）
+        if real_username in self.active_connections:
+            old_ws = self.active_connections[real_username]
             try:
                 asyncio.create_task(old_ws.close(code=4000, reason="重复登录"))
-                print(f"[LOG] authenticate({username}): kicked existing connection")
+                print(f"[LOG] authenticate({real_username}): kicked existing connection")
             except Exception as e:
-                print(f"[LOG] authenticate({username}): error kicking old connection: {e}")
-            self.disconnect(username)
+                print(f"[LOG] authenticate({real_username}): error kicking old connection: {e}")
+            self.disconnect(real_username)
 
         # 3. 提升为正式用户
         ws = self.pending_connections.pop(temp_id, None)
         if ws is None:
-            print(f"[LOG] authenticate({username}) failed: temp_id {temp_id} not found")
+            print(f"[LOG] authenticate({real_username}) failed: temp_id {temp_id} not found")
             return False
 
-        self.active_connections[username] = ws
-        update_last_online(username, None)
-        print(f"[LOG] authenticate({username}) succeeded, now {len(self.active_connections)} online")
+        self.active_connections[real_username] = ws
+        update_last_online(real_username, None)
+        print(f"[LOG] authenticate({real_username}) succeeded, now {len(self.active_connections)} online")
         return True
 
     async def send_welcome(self, username: str):
@@ -353,8 +421,11 @@ async def api_register(req: Request):
         data = await req.json()
         username = data.get("username")
         password = data.get("password")
-        ok = register_user(username, password)
-        result = {"status": "ok" if ok else "fail", "reason": None if ok else "用户已存在"}
+        ok, user_id = register_user(username, password)
+        if ok:
+            result = {"status": "ok", "user_id": user_id}
+        else:
+            result = {"status": "fail", "reason": "用户已存在"}
         print(f"[LOG] /register response: {result}")
         return result
     except Exception as e:
@@ -363,17 +434,23 @@ async def api_register(req: Request):
 
 @app.post("/login")
 async def api_login(req: Request):
-    print("[LOG] HTTP POST /login received")
     try:
         data = await req.json()
-        username = data.get("username")
+        identifier = data.get("username")
         password = data.get("password")
-        ok = check_login(username, password)
-        result = {"status": "ok" if ok else "fail", "reason": None if ok else "用户名或密码错误"}
-        print(f"[LOG] /login response: {result}")
-        return result
+        ok, real_username = check_login(identifier, password)  # ← 修改这里
+        if ok:
+            # 在 check_login 成功后，查询 user_id
+            conn = sqlite3.connect("users.db")
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM users WHERE username = ?", (real_username,))
+            row = cursor.fetchone()
+            user_id = row[0] if row else ""
+            conn.close()
+            return {"status": "ok", "username": real_username, "user_id": user_id}
+        else:
+            return {"status": "fail", "reason": "用户名或密码错误"}
     except Exception as e:
-        print(f"[LOG] /login error: {e}")
         return {"status": "fail", "reason": "请求解析失败"}
 
 # ============================================================
@@ -404,9 +481,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     }))
                     continue
                 if manager.authenticate(temp_id, username, password):
-                    print(f"[LOG] Authentication succeeded for {username}, starting message loop")
-                    await authenticated_message_loop(websocket, username)
-                    return
+                    # 获取真实用户名（你需要从 authenticate 返回它，或重新查一次）
+                    success, real_username = check_login(username, password)
+                    if success:
+                        # 👇 新增：通知客户端真实用户名
+                        await websocket.send_text(json.dumps({
+                            "type": "auth_success",
+                            "username": real_username
+                        }))
+                        # 进入消息循环
+                        await authenticated_message_loop(websocket, real_username)
+                        return
                 else:
                     await websocket.send_text(json.dumps({
                         "type": "error",

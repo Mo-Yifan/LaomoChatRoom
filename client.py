@@ -9,8 +9,9 @@ from websockets import State  # ← 新增：用于状态判断
 
 class ChatClient:
     def __init__(self):
-        self.username: Optional[str] = None
+        self.username: Optional[str] = None      # 用户输入的 identifier（ID 或用户名）
         self.password: Optional[str] = None
+        self.real_username: Optional[str] = None  # 👈 新增：真实用户名
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self.recv_callback: Optional[Callable[[dict], None]] = None
         self.on_disconnect: Optional[Callable[[websockets.ConnectionClosed], None]] = None
@@ -65,7 +66,7 @@ class ChatClient:
                     f"http://{host}:{port}/login",
                     json={"username": self.username, "password": self.password}
                 ) as resp:
-                    return await resp.json()
+                    return await resp.json()  # 现在包含 {"status":"ok", "username":"MoXiansheng"}
         except Exception as e:
             return {"status": "fail", "reason": str(e)}
 

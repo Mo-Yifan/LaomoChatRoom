@@ -9,7 +9,7 @@ import asyncio
 
 class LoginWindow(QWidget):
     login_request = pyqtSignal(str, str)       # 发给 client.py 主程序
-    register_request = pyqtSignal(str, str)    # 发给 client.py 主程序
+    open_register_window = pyqtSignal()  # 去注册信号
     login_success = pyqtSignal(str)            # 登录成功信号
 
     def __init__(self):
@@ -133,7 +133,5 @@ class LoginWindow(QWidget):
 
     # ------------------- 去注册 -------------------
     def open_register(self):
-        username = self.username.text()
-        password = self.password.text()
-        if username and password:
-            self.register_request.emit(username, password)
+        print("[DEBUG] open_register called!")  # ← 加这行
+        self.open_register_window.emit() 

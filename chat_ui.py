@@ -10,11 +10,12 @@ from datetime import datetime
 class ChatWindow(QWidget):
     send_msg = pyqtSignal(dict)  # 发送到主程序（主线程→网络线程）
 
-    def __init__(self, username):
+    def __init__(self, username, user_id):
         super().__init__()
 
         self.username = username
-        self.setWindowTitle(f"老莫聊天室：当前用户 - {username}")
+        self.user_id = user_id  # ← 保存 user_id
+        self.setWindowTitle(f"老莫聊天室-当前用户{username}（{user_id}）")  # ← 新标题格式
         self.resize(600, 500)
 
         main_layout = QVBoxLayout()
@@ -70,7 +71,7 @@ class ChatWindow(QWidget):
 
         main_layout.addLayout(bottom)
         self.setLayout(main_layout)
-
+        
     # =============================================================
     # 发送消息
     # =============================================================

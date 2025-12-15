@@ -14,7 +14,7 @@ class ClientApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
 
-        # ------------------- 输入服务器 IP 和端口 -------------------
+        # 获取服务器地址
         host, ok = QInputDialog.getText(None, "服务器 IP", "请输入服务器 IP:")
         if not ok or not host:
             sys.exit()
@@ -24,28 +24,43 @@ class ClientApp:
         self.HOST = host
         self.PORT = port
 
-        # ------------------- 初始化客户端和属性 -------------------
+        # 初始化客户端
         self.client = ChatClient()
         self.username = None
         self.password = None
         self.running = True
         self.chat_ui = None
 
-        # ------------------- 登录界面 -------------------
+        # 创建 UI
+        print(f"[DEBUG] 创建 login_ui 前: {hasattr(self, 'login_ui')}")
         self.login_ui = LoginWindow()
+        print(f"[DEBUG] login_ui 实例 ID: {id(self.login_ui)}")
+        self.register_ui = RegisterWindow()  
+        print("[DEBUG] Signals connected for login window")  # 确认执行到这里
+
+        # 连接信号
         self._connect_login_signals()
+
+        # 显示登录界面
+        print(f"[DEBUG] 显示的 login_ui ID: {id(self.login_ui)}")
         self.login_ui.show()
-
-        # ------------------- 注册界面 -------------------
-        self.register_ui = RegisterWindow()
-        self.register_ui.register_request.connect(self.on_register_request)
-
+        
     # ------------------- 延迟绑定槽函数 -------------------
     def _connect_login_signals(self):
+        print("[DEBUG] Connecting login signals")
+        
+        # 包装异步槽（如果你用的是 async/await）
         self.on_login_request = asyncSlot(str, str)(self.on_login_request)
         self.on_register_request = asyncSlot(str, str)(self.on_register_request)
+        
+        # 登录信号
         self.login_ui.login_request.connect(self.on_login_request)
-        self.login_ui.register_request.connect(self.on_register_request)
+        
+        # ✅ 关键：连接“打开注册窗口”信号
+        self.login_ui.open_register_window.connect(self.show_register_window)
+        
+        # 注册信号（建议移到 _connect_register_signals）
+        self.register_ui.register_request.connect(self.on_register_request)
 
     # ============================================================
     # 登录按钮回调
@@ -71,21 +86,25 @@ class ClientApp:
                 )
                 return
 
-            # 保存账号到本地历史（去重 + 最多保留10个）
+            # ✅ 获取真实用户名
+            real_username = result.get("username") 
+            user_id = result.get("user_id")
+            print(f"[DEBUG] 登录成功，真实用户名：{real_username}，账号：{user_id}")
+
+            # ✅ 保存到历史记录（只存 real_username）
             settings = QSettings("MyChatApp", "LoginHistory")
             history = settings.value("usernames", [], type=list)
-            if self.username in history:
-                history.remove(self.username)
-            history.insert(0, self.username)
-            history = history[:10]  # 只保留最近10个
+            if real_username in history:
+                history.remove(real_username)
+            history.insert(0, real_username)
+            history = history[:10]
             settings.setValue("usernames", history)
-            print(f"[DEBUG] Saved login history: {history}")
 
             # 2️⃣ 切换 UI
             QMessageBox.information(None, "成功", "登录成功！")
             self.login_ui.close()
 
-            self.chat_ui = ChatWindow(self.username)
+            self.chat_ui = ChatWindow(real_username, user_id)
             self.client.recv_callback = self.on_server_msg
             self.client.on_disconnect = self.on_ws_disconnect  # ← 关键：注册断开回调
             self.chat_ui.send_msg.connect(self.dispatch_send_message)
@@ -137,11 +156,19 @@ class ClientApp:
         try:
             result = await self.client.register(self.HOST, self.PORT)
             if result.get("status") == "ok":
-                QMessageBox.information(None, "成功", "注册成功，请登录！")
+                user_id = result.get("user_id", "未知")
+                QMessageBox.information(None, "注册成功", f"注册成功！您的账号 ID 是：\n\n{user_id}\n\n请妥善保存！")
+                self.register_ui.close()
             else:
                 QMessageBox.warning(None, "注册失败", result.get("reason", "注册失败"))
         except Exception as e:
             QMessageBox.critical(None, "错误", f"注册异常: {e}")
+
+    def show_register_window(self):
+        print("[DEBUG] Showing register window!")
+        self.register_ui.show()
+        self.register_ui.raise_()
+        self.register_ui.activateWindow()
 
     # ============================================================
     # 消息分发

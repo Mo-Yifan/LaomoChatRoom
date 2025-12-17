@@ -14,7 +14,7 @@ class LoginWindow(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Login")
+        self.setWindowTitle("老莫聊天室-登录")
         self.resize(420, 320)
         self.setStyleSheet("""
             QWidget {
@@ -28,7 +28,7 @@ class LoginWindow(QWidget):
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        title = QLabel("用户登录")
+        title = QLabel("欢迎使用老莫聊天室！")
         title.setFont(QFont("微软雅黑", 22, QFont.Weight.Bold))
         title.setStyleSheet("color: white;")
         layout.addWidget(title)

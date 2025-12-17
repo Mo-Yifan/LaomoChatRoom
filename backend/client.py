@@ -69,6 +69,47 @@ class ChatClient:
                     return await resp.json()  # 现在包含 {"status":"ok", "username":"MoXiansheng"}
         except Exception as e:
             return {"status": "fail", "reason": str(e)}
+    
+    async def fetch_all_users(self, host: str, port: int) -> list:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"http://{host}:{port}/all_users") as resp:
+                    data = await resp.json()
+                    if data.get("status") == "ok":
+                        return data.get("users", [])
+                    else:
+                        print(f"[客户端] 获取用户列表失败: {data.get('reason')}")
+                        return []
+        except Exception as e:
+            print(f"[客户端] 获取用户列表异常: {e}")
+            return []
+    
+    async def create_group(self, group_name: str):
+        """创建新群组"""
+        if not group_name.strip():
+            return
+        await self.send_packet({
+            "type": "create_group",
+            "group_name": group_name.strip()
+        })
+
+    async def join_group(self, group_id: str):
+        """加入指定群组"""
+        if not group_id or not group_id.startswith("G"):
+            return
+        await self.send_packet({
+            "type": "join_group",
+            "group_id": group_id
+        })
+
+    async def leave_group(self, group_id: str):
+        """退出指定群组"""
+        if not group_id or not group_id.startswith("G"):
+            return
+        await self.send_packet({
+            "type": "leave_group",
+            "group_id": group_id
+        })
 
     # -----------------------------
     # 发送
@@ -95,9 +136,20 @@ class ChatClient:
             import traceback
             traceback.print_exc()
 
-    async def send_group(self, text: str):
-        if text.strip():
-            await self.send_packet({"type": "group", "text": text})
+    async def send_group(self, text: str, group_id: Optional[str] = None):
+        """
+        发送群消息
+        - 如果 group_id 为 None，则发到默认群（如旧版 __GROUP__）
+        - 否则发到指定群ID（如 G123456789）
+        """
+        if not text.strip():
+            return
+        target = group_id if group_id else "__GROUP__"
+        await self.send_packet({
+            "type": "group",
+            "to": target,
+            "text": text
+        })
 
     async def send_private(self, to_user: str, text: str):
         if to_user and to_user != self.username and text.strip():

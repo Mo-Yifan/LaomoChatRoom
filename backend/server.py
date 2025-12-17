@@ -37,13 +37,25 @@ def generate_unique_user_id(cursor, max_attempts=100):
             return candidate
     raise RuntimeError("无法生成唯一用户ID（尝试次数过多）")
 
+#===========================================================
+# 生成唯一群 ID 的辅助函数
+#===========================================================
+def generate_unique_group_id(cursor, max_attempts=100):
+    """生成 10 位唯一群 ID，格式为 G + 9 位数字（如 G123456789）"""
+    for _ in range(max_attempts):
+        candidate = "G" + f"{random.randint(0, 999999999):09d}"
+        cursor.execute("SELECT 1 FROM groups WHERE group_id = ?", (candidate,))
+        if cursor.fetchone() is None:
+            return candidate
+    raise RuntimeError("无法生成唯一群ID（尝试次数过多）")
+
 # ============================================================
 # 数据库初始化
 # ============================================================
 def init_db():
     print("[LOG] init_db() called")
     try:
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect("../data/users.db")
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -57,7 +69,7 @@ def init_db():
         conn.commit()
         conn.close()
 
-        conn = sqlite3.connect("messages.db")
+        conn = sqlite3.connect("../data/messages.db")
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS messages (
@@ -74,6 +86,28 @@ def init_db():
         conn.commit()
         conn.close()
 
+        # === groups.db: 群组元数据（新增）===
+        conn = sqlite3.connect("../data/groups.db")
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS groups (
+                group_id TEXT PRIMARY KEY,
+                group_name TEXT NOT NULL,
+                creator TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS group_members (
+                group_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                joined_at TEXT NOT NULL,
+                UNIQUE(group_id, username)
+            )
+        """)
+        conn.commit()
+        conn.close()
+
         print("[LOG] init_db() succeeded: tables created or exist")
     except Exception as e:
         print(f"[LOG] init_db() failed: {e}")
@@ -86,7 +120,7 @@ init_db()
 def register_user(username: str, password: str) -> tuple[bool, str]:  # 返回 (成功, user_id)
     print(f"[LOG] register_user(username={username}) called")
     try:
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect("../data/users.db")
         cursor = conn.cursor()
         
         # 生成唯一 ID
@@ -114,7 +148,7 @@ def check_login(identifier: str, password: str) -> tuple[bool, str]:
     """
     print(f"[LOG] check_login(identifier={identifier}) called")
     try:
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect("../data/users.db")
         cursor = conn.cursor()
         # 尝试按 username 或 user_id 查
         cursor.execute(
@@ -137,7 +171,7 @@ def check_login(identifier: str, password: str) -> tuple[bool, str]:
 def update_last_online(username: str, time):
     print(f"[LOG] update_last_online(username={username}, time={time}) called")
     try:
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect("../data/users.db")
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE users SET last_online=? WHERE username=?", (time, username)
@@ -149,13 +183,148 @@ def update_last_online(username: str, time):
         print(f"[LOG] update_last_online({username}) failed: {e}")
 
 # ============================================================
+# 群组管理函数
+# ============================================================
+def create_group(creator: str, group_name: str) -> tuple[bool, str]:
+    print(f"[LOG] create_group(creator={creator}, name={group_name}) called")
+    try:
+        conn = sqlite3.connect("../data/groups.db")
+        cursor = conn.cursor()
+        
+        # 生成唯一群ID
+        for _ in range(100):
+            candidate = "G" + f"{random.randint(0, 999999999):09d}"
+            cursor.execute("SELECT 1 FROM groups WHERE group_id = ?", (candidate,))
+            if cursor.fetchone() is None:
+                gid = candidate
+                break
+        else:
+            raise RuntimeError("无法生成唯一群ID")
+
+        # 【关键】生成当前时间字符串
+        created_at = datetime.now().isoformat(timespec="seconds")  # 如 "2025-12-17T16:30:45"
+
+        # 【关键】插入所有 NOT NULL 字段：group_id, group_name, creator, created_at
+        cursor.execute(
+            "INSERT INTO groups (group_id, group_name, creator, created_at) VALUES (?, ?, ?, ?)",
+            (gid, group_name, creator, created_at)
+        )
+        
+        # 同时将创建者加入群成员表
+        cursor.execute(
+            "INSERT INTO group_members (group_id, username, joined_at) VALUES (?, ?, ?)",
+            (gid, creator, created_at)
+        )
+        
+        conn.commit()
+        conn.close()
+        print(f"[LOG] create_group succeeded: {gid} ({group_name})")
+        return True, gid
+    except Exception as e:
+        print(f"[ERROR] create_group failed: {e}")
+        return False, ""
+
+async def join_group(username: str, group_id: str) -> bool:
+    print(f"[LOG] join_group({username}, {group_id}) called")
+    try:
+        # 检查群是否存在
+        conn = sqlite3.connect("../data/groups.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM groups WHERE group_id = ?", (group_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return False
+
+        # 检查是否已加入
+        cursor.execute("SELECT 1 FROM group_members WHERE username = ? AND group_id = ?", (username, group_id))
+        if cursor.fetchone():
+            conn.close()
+            return True  # 已加入，无需重复插入
+
+        # 插入成员关系
+        now = datetime.now().isoformat(timespec="seconds")
+        cursor.execute(
+            "INSERT INTO group_members (username, group_id, joined_at) VALUES (?, ?, ?)",
+            (username, group_id, now)
+        )
+        conn.commit()
+        conn.close()
+
+        # 【关键】获取群名称并发送给用户
+        cursor = sqlite3.connect("../data/groups.db").cursor()
+        cursor.execute("SELECT group_name FROM groups WHERE group_id = ?", (group_id,))
+        row = cursor.fetchone()
+        group_name = row[0] if row else f"群-{group_id}"
+        cursor.close()
+
+        # 推送 my_groups
+        groups = get_user_groups(username)
+        my_groups = [{"id": gid, "name": gname} for (gid, gname) in groups]
+        await manager.send_json(username, {
+            "type": "my_groups",
+            "groups": my_groups
+        })
+
+        # 广播（使用 manager.broadcast，不要 broadcast_system）
+        system_msg = {
+            "type": "system",
+            "event": "user_joined_group",
+            "username": username,
+            "text": f"{username} 加入了群聊"
+        }
+        await manager.broadcast(system_msg, exclude=username)
+
+        return True
+    
+    except Exception as e:
+        print(f"[ERROR] join_group failed: {e}")
+        return False
+
+def leave_group(username: str, group_id: str) -> bool:
+    print(f"[LOG] leave_group(user={username}, group={group_id}) called")
+    try:
+        conn = sqlite3.connect("../data/groups.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM group_members WHERE group_id = ? AND username = ?",
+            (group_id, username)
+        )
+        conn.commit()
+        conn.close()
+        print(f"[LOG] leave_group succeeded")
+        return True
+    except Exception as e:
+        print(f"[LOG] leave_group failed: {e}")
+        return False
+
+def get_user_groups(username: str):
+    """获取用户加入的所有群组 [(group_id, group_name), ...]"""
+    print(f"[LOG] get_user_groups(user={username}) called")
+    try:
+        conn = sqlite3.connect("../data/groups.db")
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT g.group_id, g.group_name
+            FROM group_members gm
+            JOIN groups g ON gm.group_id = g.group_id
+            WHERE gm.username = ?
+        """, (username,))
+        groups = cursor.fetchall()
+        conn.close()
+        print(f"[LOG] get_user_groups returned {len(groups)} groups")
+        return groups
+    except Exception as e:
+        print(f"[LOG] get_user_groups failed: {e}")
+        return []
+
+# ============================================================
 # 消息存储（所有消息都存 message_type）（保持不变）
 # ============================================================
 def save_message(sender, receiver, content, message_type):
     print(f"[LOG] save_message(sender={sender}, receiver={receiver}, type={message_type}) called")
     try:
         time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        conn = sqlite3.connect("messages.db")
+        conn = sqlite3.connect("../data/messages.db")
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO messages(sender, receiver, content, timestamp, message_type, delivered)
@@ -172,7 +341,8 @@ def save_message(sender, receiver, content, message_type):
 def get_offline_messages(username):
     print(f"[LOG] get_offline_messages(username={username}) called")
     try:
-        conn = sqlite3.connect("messages.db")
+        conn = sqlite3.connect("../data/messages.db")
+        conn.row_factory = sqlite3.Row  # ← 启用字典式访问
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, sender, receiver, content, timestamp, message_type
@@ -180,8 +350,11 @@ def get_offline_messages(username):
             WHERE receiver=? AND delivered=0
             ORDER BY timestamp ASC
         """, (username,))
-        msgs = cursor.fetchall()
+        rows = cursor.fetchall()
         conn.close()
+
+        # 转为标准 dict 列表（可选，但更安全）
+        msgs = [dict(row) for row in rows]
         print(f"[LOG] get_offline_messages({username}) returned {len(msgs)} messages")
         return msgs
     except Exception as e:
@@ -194,7 +367,7 @@ def mark_messages_delivered(ids):
         print("[LOG] mark_messages_delivered: no ids, skipped")
         return
     try:
-        conn = sqlite3.connect("messages.db")
+        conn = sqlite3.connect("../data/messages.db")
         cursor = conn.cursor()
         cursor.executemany(
             "UPDATE messages SET delivered=1 WHERE id=?",
@@ -207,21 +380,61 @@ def mark_messages_delivered(ids):
         print(f"[LOG] mark_messages_delivered failed: {e}")
 
 def get_full_history(username):
-    """用户相关历史（含私聊、群聊）"""
     print(f"[LOG] get_full_history(username={username}) called")
     try:
-        conn = sqlite3.connect("messages.db")
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT sender, receiver, content, timestamp, message_type
-            FROM messages
-            WHERE sender=? OR receiver=? OR receiver='__GROUP__'
-            ORDER BY timestamp ASC
-        """, (username, username))
-        msgs = cursor.fetchall()
-        conn.close()
-        print(f"[LOG] get_full_history({username}) returned {len(msgs)} messages")
-        return msgs
+        # 1. 获取用户所属群ID
+        conn_groups = sqlite3.connect("../data/groups.db")
+        cursor_g = conn_groups.cursor()
+        cursor_g.execute("SELECT group_id FROM group_members WHERE username = ?", (username,))
+        group_ids = [row[0] for row in cursor_g.fetchall()]
+        conn_groups.close()
+
+        # 2. 查询消息
+        conn_msg = sqlite3.connect("../data/messages.db")
+        conn_msg.row_factory = sqlite3.Row  # ← 启用字典式访问
+        cursor_m = conn_msg.cursor()
+
+        if group_ids:
+            placeholders = ','.join('?' * len(group_ids))
+            query = f"""
+                SELECT sender, receiver, content, timestamp, message_type
+                FROM messages
+                WHERE sender = ? OR receiver = ? OR receiver IN ({placeholders})
+                ORDER BY timestamp ASC
+            """
+            params = [username, username] + group_ids
+        else:
+            query = """
+                SELECT sender, receiver, content, timestamp, message_type
+                FROM messages
+                WHERE sender = ? OR receiver = ?
+                ORDER BY timestamp ASC
+            """
+            params = [username, username]
+
+        cursor_m.execute(query, params)
+        rows = cursor_m.fetchall()
+        conn_msg.close()
+
+        # 转为标准 dict，并补充前端需要的字段
+        messages = []
+        for row in rows:
+            msg_dict = dict(row)
+            # 推断 chat_type
+            if msg_dict["message_type"] == "group":
+                msg_dict["chat_type"] = "group"
+                msg_dict["target"] = msg_dict["receiver"]  # 群ID
+            else:
+                msg_dict["chat_type"] = "private"
+                # 私聊 target 是对方
+                if msg_dict["sender"] == username:
+                    msg_dict["target"] = msg_dict["receiver"]
+                else:
+                    msg_dict["target"] = msg_dict["sender"]
+            messages.append(msg_dict)
+
+        print(f"[LOG] get_full_history({username}) returned {len(messages)} messages")
+        return messages
     except Exception as e:
         print(f"[LOG] get_full_history({username}) failed: {e}")
         return []
@@ -313,47 +526,57 @@ class ConnectionManager:
         return True
 
     async def send_welcome(self, username: str):
-        """发送欢迎包：离线消息 + 历史漫游 + 上线广播"""
         print(f"[LOG] send_welcome({username}) started")
         try:
-            # 离线消息
-            offline = get_offline_messages(username)
-            offline_ids = []
-            for mid, sender, receiver, content, ts, mtype in offline:
-                await self.send_json(username, make_message(
-                    msg_type=mtype, sender=sender, receiver=receiver, text=content, timestamp=ts
-                ))
-                offline_ids.append(mid)
-            mark_messages_delivered(offline_ids)
+            # 1. 获取离线消息
+            offline_msgs = get_offline_messages(username)
+            for msg in offline_msgs:
+                await self.send_json(username, msg)
+            if offline_msgs:
+                msg_ids = [msg["message_id"] for msg in offline_msgs if "message_id" in msg]
+                mark_messages_delivered(msg_ids)
 
-            # 历史漫游
-            history = get_full_history(username)
-            hist_msg_list = [
-                make_message(
-                    msg_type=mtype,
-                    sender=sender,
-                    receiver=receiver,
-                    text=content,
-                    timestamp=ts
-                )
-                for (sender, receiver, content, ts, mtype) in history
-            ]
+            # 2. 获取完整历史（可选，你已有）
+            full_history = get_full_history(username)
+            for msg in full_history:
+                # 确保只发送必要字段，避免泄露 id 等
+                safe_msg = {
+                    "type": "message",
+                    "sender": msg["sender"],
+                    "target": msg["target"],
+                    "content": msg["content"],
+                    "timestamp": msg["timestamp"],
+                    "chat_type": msg["chat_type"]
+                }
+                await self.send_json(username, safe_msg)
+
+            # 3. 【关键新增】获取并推送用户所属群组！
+            groups = get_user_groups(username)  # 返回 [(group_id, group_name), ...]
+            my_groups = [{"id": gid, "name": gname} for (gid, gname) in groups]
             await self.send_json(username, {
-                "type": "history",
-                "messages": hist_msg_list
+                "type": "my_groups",
+                "groups": my_groups
             })
 
-            # 上线广播
-            await self.broadcast(make_message(
-                msg_type="system",
-                text=f"{username} 上线了",
-                extra={"event": "user_join", "username": username}
-            ), exclude=username)
+            # 4. 广播上线通知（使用已有的 broadcast）
+            system_msg = {
+                "type": "system",
+                "event": "user_online",
+                "username": username,
+                "text": f"{username} 上线了"
+            }
+            await self.broadcast(system_msg, exclude=username)
+
+            # === 新增：推送当前所有在线用户 ===
+            online_usernames = list(manager.active_connections.keys())
+            await self.send_json(username, {
+                "type": "online_users",
+                "usernames": online_usernames
+            })
+            
             print(f"[LOG] send_welcome({username}) completed successfully")
         except Exception as e:
-            print(f"[LOG] send_welcome({username}) crashed: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[ERROR] send_welcome({username}) failed: {e}")
 
     async def send_json(self, username: str, data: dict):
         print(f"[LOG] send_json(to={username}, type={data.get('type')}) called")
@@ -368,6 +591,34 @@ class ConnectionManager:
         else:
             print(f"[LOG] send_json failed: {username} not in active_connections")
 
+    async def broadcast_to_group(self, group_id: str, data: dict, exclude: str = None):
+        print(f"[LOG] broadcast_to_group(group={group_id}, type={data.get('type')}, exclude={exclude}) called")
+        try:
+            # 从 groups.db 获取群成员
+            conn = sqlite3.connect("../data/groups.db")  # ← 关键修改
+            cursor = conn.cursor()
+            cursor.execute("SELECT username FROM group_members WHERE group_id = ?", (group_id,))
+            members = [row[0] for row in cursor.fetchall()]
+            conn.close()
+
+            msg_str = json.dumps(data, ensure_ascii=False)
+            dead_users = []
+            for username in members:
+                if username == exclude:
+                    continue
+                ws = self.active_connections.get(username)
+                if ws:
+                    try:
+                        await ws.send_text(msg_str)
+                    except Exception as e:
+                        print(f"[LOG] broadcast_to_group to {username} failed: {e}")
+                        dead_users.append(username)
+            for u in dead_users:
+                self.disconnect(u)
+            print(f"[LOG] broadcast_to_group completed to {len(members) - len(dead_users)} users")
+        except Exception as e:
+            print(f"[LOG] broadcast_to_group error: {e}")
+    
     async def broadcast(self, data: dict, exclude: str = None):
         print(f"[LOG] broadcast(type={data.get('type')}, exclude={exclude}) called, current online: {list(self.active_connections.keys())}")
         msg_str = json.dumps(data, ensure_ascii=False)
@@ -414,20 +665,48 @@ async def api_login(req: Request):
         data = await req.json()
         identifier = data.get("username")
         password = data.get("password")
-        ok, real_username = check_login(identifier, password)  # ← 修改这里
+        ok, real_username = check_login(identifier, password)
         if ok:
-            # 在 check_login 成功后，查询 user_id
-            conn = sqlite3.connect("users.db")
+            # 查询 user_id 和 群列表
+            conn = sqlite3.connect("../data/users.db")
             cursor = conn.cursor()
             cursor.execute("SELECT user_id FROM users WHERE username = ?", (real_username,))
             row = cursor.fetchone()
             user_id = row[0] if row else ""
             conn.close()
-            return {"status": "ok", "username": real_username, "user_id": user_id}
+
+            # 获取用户所属群组（调用已有函数）
+            groups = get_user_groups(real_username)  # 返回 [(group_id, group_name), ...]
+
+            # 转换为字典列表
+            my_groups = [{"id": gid, "name": gname} for (gid, gname) in groups]
+
+            return {
+                "status": "ok",
+                "username": real_username,
+                "user_id": user_id,
+                "my_groups": my_groups  # ← 【新增】登录即返回群列表！
+            }
         else:
             return {"status": "fail", "reason": "用户名或密码错误"}
     except Exception as e:
+        print(f"[LOG] /login error: {e}")
         return {"status": "fail", "reason": "请求解析失败"}
+
+@app.get("/all_users")
+async def get_all_users():
+    print("[LOG] GET /all_users called")
+    try:
+        conn = sqlite3.connect("../data/users.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT username, last_online FROM users ORDER BY username")
+        rows = cursor.fetchall()
+        conn.close()
+        users = [{"username": row[0], "last_online": row[1]} for row in rows]
+        return {"status": "ok", "users": users}
+    except Exception as e:
+        print(f"[LOG] /all_users error: {e}")
+        return {"status": "fail", "reason": str(e)}
 
 # ============================================================
 # WebSocket：统一入口 /ws（无路径参数！）
@@ -499,6 +778,7 @@ async def authenticated_message_loop(websocket: WebSocket, username: str):
                 continue
             msg_type = msg.get("type")
             content = msg.get("text")
+
             if msg_type == "private":
                 target = msg.get("to")
                 content = msg.get("text")
@@ -516,17 +796,68 @@ async def authenticated_message_loop(websocket: WebSocket, username: str):
                     print(f"[LOG] Private message sent to {target}")
                 else:
                     print(f"[LOG] {target} is offline; message stored")
+            
             elif msg_type == "group":
-                if not content:
-                    print(f"[LOG] Empty group message from {username}")
+                target_group = msg.get("to")  # 如 "G123456789"
+                content = msg.get("text")
+                if not target_group or not target_group.startswith("G") or not content:
+                    print(f"[LOG] Invalid group message from {username}")
                     continue
-                ts = save_message(username, "__GROUP__", content, "group")
-                packet = make_message("group", username, "__GROUP__", content, ts)
-                await manager.broadcast(packet, exclude=username)
-                print(f"[LOG] Group message from {username} broadcasted")
+                # 保存消息（receiver 为群ID）
+                ts = save_message(username, target_group, content, "group")
+                packet = make_message("group", username, target_group, content, ts)
+                # 广播给该群成员
+                await manager.broadcast_to_group(target_group, packet, exclude=username)
+                print(f"[LOG] Group message from {username} to {target_group} broadcasted")
+            
+            # ===== 新增：创建群组 =====
+            elif msg_type == "create_group":
+                group_name = msg.get("group_name", "").strip()
+                if not group_name:
+                    await websocket.send_text(json.dumps({"type": "error", "text": "群名称不能为空"}))
+                    continue
+                ok, gid = create_group(username, group_name)
+                if ok:
+                    await websocket.send_text(json.dumps({
+                        "type": "group_created",
+                        "group_id": gid,
+                        "group_name": group_name  # ← 【新增】返回群名！
+                    }))
+                    print(f"[LOG] Group {gid} created by {username}")
+                else:
+                    await websocket.send_text(json.dumps({"type": "error", "text": "创建群组失败"}))
+
+            # ===== 新增：加入群组 =====
+            elif msg_type == "join_group":
+                group_id = msg.get("group_id", "").strip()
+                if not group_id or not group_id.startswith("G"):
+                    await websocket.send_text(json.dumps({"type": "error", "text": "无效群ID"}))
+                    continue
+                if join_group(username, group_id):
+                    await websocket.send_text(json.dumps({
+                        "type": "group_joined",
+                        "group_id": group_id
+                    }))
+                    print(f"[LOG] {username} joined group {group_id}")
+                else:
+                    await websocket.send_text(json.dumps({"type": "error", "text": "加入群组失败（群不存在或已加入）"}))
+
+            # ===== 新增：退出群组 =====
+            elif msg_type == "leave_group":
+                group_id = msg.get("group_id", "").strip()
+                if leave_group(username, group_id):
+                    await websocket.send_text(json.dumps({
+                        "type": "group_left",
+                        "group_id": group_id
+                    }))
+                    print(f"[LOG] {username} left group {group_id}")
+                else:
+                    await websocket.send_text(json.dumps({"type": "error", "text": "退出群组失败"}))
+            
             elif msg_type == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
                 print(f"[LOG] Ping from {username} replied")
+            
             else:
                 print(f"[LOG] Unknown message type from {username}: {msg_type}")
     except WebSocketDisconnect:

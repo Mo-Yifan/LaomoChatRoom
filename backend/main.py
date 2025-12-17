@@ -32,34 +32,26 @@ class ClientApp:
         self.chat_ui = None
 
         # 创建 UI
-        print(f"[DEBUG] 创建 login_ui 前: {hasattr(self, 'login_ui')}")
         self.login_ui = LoginWindow()
-        print(f"[DEBUG] login_ui 实例 ID: {id(self.login_ui)}")
-        self.register_ui = RegisterWindow()  
-        print("[DEBUG] Signals connected for login window")  # 确认执行到这里
+        self.register_ui = RegisterWindow()
 
         # 连接信号
         self._connect_login_signals()
 
         # 显示登录界面
-        print(f"[DEBUG] 显示的 login_ui ID: {id(self.login_ui)}")
         self.login_ui.show()
-        
+
     # ------------------- 延迟绑定槽函数 -------------------
     def _connect_login_signals(self):
-        print("[DEBUG] Connecting login signals")
-        
-        # 包装异步槽（如果你用的是 async/await）
+        # 包装异步槽
         self.on_login_request = asyncSlot(str, str)(self.on_login_request)
         self.on_register_request = asyncSlot(str, str)(self.on_register_request)
-        
+
         # 登录信号
         self.login_ui.login_request.connect(self.on_login_request)
-        
-        # ✅ 关键：连接“打开注册窗口”信号
         self.login_ui.open_register_window.connect(self.show_register_window)
-        
-        # 注册信号（建议移到 _connect_register_signals）
+
+        # 注册信号
         self.register_ui.register_request.connect(self.on_register_request)
 
     # ============================================================
@@ -72,7 +64,7 @@ class ClientApp:
         await self.async_login()
 
     # ============================================================
-    # 异步登录（核心修复：移除轮询，改用 on_disconnect）
+    # 异步登录（核心）
     # ============================================================
     @asyncSlot()
     async def async_login(self):
@@ -81,17 +73,15 @@ class ClientApp:
             result = await self.client.login(self.HOST, self.PORT)
             if result.get("status") != "ok":
                 QMessageBox.warning(
-                    None, "错误",
-                    result.get("reason", "用户名或密码错误")
+                    None, "错误", result.get("reason", "用户名或密码错误")
                 )
                 return
 
-            # ✅ 获取真实用户名
-            real_username = result.get("username") 
+            real_username = result.get("username")
             user_id = result.get("user_id")
             print(f"[DEBUG] 登录成功，真实用户名：{real_username}，账号：{user_id}")
 
-            # ✅ 保存到历史记录（只存 real_username）
+            # 保存历史记录
             settings = QSettings("MyChatApp", "LoginHistory")
             history = settings.value("usernames", [], type=list)
             if real_username in history:
@@ -103,12 +93,17 @@ class ClientApp:
             # 2️⃣ 切换 UI
             QMessageBox.information(None, "成功", "登录成功！")
             self.login_ui.close()
-
             self.chat_ui = ChatWindow(real_username, user_id)
             self.client.recv_callback = self.on_server_msg
-            self.client.on_disconnect = self.on_ws_disconnect  # ← 关键：注册断开回调
+            self.client.on_disconnect = self.on_ws_disconnect
             self.chat_ui.send_msg.connect(self.dispatch_send_message)
             self.chat_ui.show()
+            # 在登录成功后（self.chat_ui 创建之后）
+            # 获取所有用户
+            all_users = await self.client.fetch_all_users(self.HOST, self.PORT)
+            self.chat_ui.set_all_users(all_users)
+            # 获取初始在线用户（可通过 manager.active_connections.keys()，但客户端不知道）
+            # 所以我们依赖后续的 system 消息来填充 online_users
 
             # 3️⃣ 连接 WebSocket（含 login 认证）
             success = await self.client.connect_ws(self.HOST, self.PORT)
@@ -118,9 +113,6 @@ class ClientApp:
                 self.login_ui.show()
                 return
 
-            # 🌟 不再轮询！等待连接自然断开（receive_loop 会触发 on_disconnect）
-            # 主协程不阻塞，由 receive_loop + on_disconnect 驱动生命周期
-
         except Exception as e:
             QMessageBox.critical(None, "登录异常", f"{type(e).__name__}: {e}")
             if self.chat_ui and self.chat_ui.isVisible():
@@ -129,10 +121,9 @@ class ClientApp:
                 self.login_ui.show()
 
     # ============================================================
-    # WebSocket 断开回调（线程安全）
+    # WebSocket 断开回调
     # ============================================================
     def on_ws_disconnect(self, exc: websockets.ConnectionClosed):
-        # 使用 call_soon_threadsafe 确保在主线程执行 UI 操作
         asyncio.get_event_loop().call_soon_threadsafe(self._handle_disconnect, exc)
 
     def _handle_disconnect(self, exc):
@@ -165,19 +156,46 @@ class ClientApp:
             QMessageBox.critical(None, "错误", f"注册异常: {e}")
 
     def show_register_window(self):
-        print("[DEBUG] Showing register window!")
         self.register_ui.show()
         self.register_ui.raise_()
         self.register_ui.activateWindow()
 
     # ============================================================
-    # 消息分发
+    # 【关键】消息分发：处理所有 send_msg 信号
+    # 支持：group / private / create_group / join_group
     # ============================================================
-    def dispatch_send_message(self, msg):
-        if msg["type"] == "private":
-            asyncio.create_task(self.client.send_private(msg["to"], msg["text"]))
-        elif msg["type"] == "group":
-            asyncio.create_task(self.client.send_group(msg["text"]))
+    def dispatch_send_message(self, msg_dict: dict):
+        """统一入口：根据 type 分发不同操作"""
+        msg_type = msg_dict.get("type")
+
+        if msg_type == "create_group":
+            group_name = msg_dict.get("group_name", "").strip()
+            if group_name:
+                asyncio.create_task(self.client.create_group(group_name))
+            else:
+                QMessageBox.warning(self.chat_ui, "提示", "群名称不能为空")
+
+        elif msg_type == "join_group":
+            group_id = msg_dict.get("group_id", "").strip()
+            if group_id:
+                asyncio.create_task(self.client.join_group(group_id))
+            else:
+                QMessageBox.warning(self.chat_ui, "提示", "群ID无效")
+
+        elif msg_type == "private":
+            to_user = msg_dict.get("to")
+            text = msg_dict.get("text")
+            if to_user and text:
+                asyncio.create_task(self.client.send_private(to_user, text))
+
+        elif msg_type == "group":
+            to_group = msg_dict.get("to")
+            text = msg_dict.get("text")
+            if to_group and text:
+                asyncio.create_task(self.client.send_group(text, to_group))
+
+        else:
+            print(f"[WARN] 未知消息类型: {msg_type}")
 
     # ============================================================
     # 消息接收处理（UI 更新）
@@ -192,16 +210,12 @@ class ClientApp:
     def run(self):
         import asyncio
         import sys
-
         if sys.platform == "win32":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-
         qloop = QEventLoop(self.app, loop)
         asyncio.set_event_loop(qloop)
-
         try:
             qloop.run_forever()
         finally:

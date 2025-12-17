@@ -15,13 +15,14 @@
   - 实时群聊 & 私聊（`@用户名 消息`）
   - 离线消息自动投递（上线后立即接收）
   - 完整聊天历史漫游（含私聊和群聊）
+  - 系统消息显示更美观，尽显高级感
 - **安全机制**：
   - 防冒用：WebSocket 连接必须先通过 `login` 认证
   - 重复登录自动踢出旧连接
 - **用户体验**：
   - 登录界面支持历史账号自动补全
   - 注册/登录窗口平滑切换
-  - 消息按时间格式化显示（今日显示时分秒，历史消息显示完整日期）
+  - 消息按时间格式化显示
 
 ---
 
@@ -106,7 +107,7 @@ pip install fastapi uvicorn[standard] websockets aiohttp PyQt6 qasync
 
 ## 注意事项
 
-- **数据库**：首次运行自动创建 `users.db`，包含 `users` 和 `messages` 表。
+- **数据库**：首次运行自动创建 `users.db`和`message.db`，实现用户数据与消息数据的分流。
 - **账号 ID**：注册时系统分配 10 位唯一数字 ID（如 `0827364915`），可替代用户名登录。
 - **Windows 兼容**：已适配 Windows asyncio 事件循环策略，无需额外配置。
 - **开发模式**：所有函数均有 `[LOG]` 打印，便于调试（生产可移除）。
@@ -114,5 +115,5 @@ pip install fastapi uvicorn[standard] websockets aiohttp PyQt6 qasync
 ---
 
 > 作者：MoYifan
-> 版本：v3.0（增强认证 + 全日志版）  
+> 版本：v3.1 
 > 祝你聊天愉快！

@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
     QPushButton, QLabel, QLineEdit, QMessageBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
 from datetime import datetime
 
@@ -151,7 +151,26 @@ class ChatWindow(QWidget):
         print(f"[SERVER MSG] 收到服务器消息: {msg}")
         msg_type = msg.get("type")
 
-        if msg_type == "history":
+        # ===== 新增：处理系统上线提示 =====
+        if msg_type == "system":
+            # 注意：event 和 username 在 msg 顶层，不在 extra 里！
+            event = msg.get("event")
+            username = msg.get("username")
+
+            if event == "user_join":
+                if username == self.username:
+                    self.show_system_notification("欢迎回来")
+                else:
+                    self.show_system_notification(f"{username} 上线了")
+            elif event == "user_leave":
+                self.show_system_notification(f"{username} 下线了")
+        
+        if msg_type == "auth_success":
+            username = msg.get("username")
+            if username == self.username:
+                self.show_system_notification("欢迎回来，看看你的朋友给你发了什么吧")
+    
+        elif msg_type == "history":
             print(f"[DEBUG] 收到历史消息，共 {len(msg.get('messages', []))} 条")
             for i, m in enumerate(msg.get("messages", [])):
                 print(f"  [{i}] type={type(m)}, content={repr(m)}")
@@ -171,10 +190,6 @@ class ChatWindow(QWidget):
         elif msg_type == "private":
             rendered = self.render_message(msg)
             self.add_message(rendered, is_user=(msg.get("from") == self.username))
-
-        elif msg_type == "system":
-            rendered = self.render_message(msg)
-            self.add_message(rendered, is_user=False)
 
         else:
             unknown_text = f"[未知消息类型: {msg_type}] {msg}"
@@ -216,3 +231,31 @@ class ChatWindow(QWidget):
 
         else:
             return f"[{display_time}] [未知] {content}"
+    
+    def show_system_notification(self, text: str):
+        """显示灰色半透明亚克力风格的系统提示，插入到最新消息下方并居中"""
+        print("[DEBUG]渲染中，请稍后")
+        # 创建标签
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setFont(QFont("微软雅黑", 12))
+        
+        # 设置样式：亚克力风（半透明灰底 + 圆角 + 边框）
+        label.setStyleSheet("""
+            background-color: rgba(240, 240, 240, 0.8);   /* 半透明灰白 */
+            color: #333;
+            border-radius: 12px;
+            padding: 8px 16px;
+            margin: 5px 0;
+            border: 1px solid rgba(200, 200, 200, 0.8);
+            font-size: 12px;
+        """)
+
+        # 创建水平布局，让 label 居中
+        h_layout = QHBoxLayout()
+        h_layout.addStretch()  # 左边留空
+        h_layout.addWidget(label)  # 居中
+        h_layout.addStretch()  # 右边留空
+
+        # 插入到 chat_area 的最后一个位置（最新消息之后）
+        self.chat_area.addLayout(h_layout)

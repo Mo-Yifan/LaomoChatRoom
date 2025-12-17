@@ -54,19 +54,11 @@ def init_db():
             )
         """)
 
-        # === 新增：检查是否存在 user_id 列，若无则添加 ===
-        cursor.execute("PRAGMA table_info(users)")
-        columns = [info[1] for info in cursor.fetchall()]
-        if "user_id" not in columns:
-            print("[LOG] Adding missing column 'user_id' to users table...")
-            cursor.execute("ALTER TABLE users ADD COLUMN user_id TEXT UNIQUE")
-            # 为已有用户生成 user_id
-            cursor.execute("SELECT username FROM users WHERE user_id IS NULL")
-            for (username,) in cursor.fetchall():
-                new_id = generate_unique_user_id(cursor)
-                cursor.execute("UPDATE users SET user_id = ? WHERE username = ?", (new_id, username))
-                print(f"[LOG] Assigned user_id {new_id} to existing user {username}")
-        
+        conn.commit()
+        conn.close()
+
+        conn = sqlite3.connect("messages.db")
+        cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,22 +70,6 @@ def init_db():
                 delivered INTEGER DEFAULT 0
             )
         """)
-        
-        # 检查是否已有 user_id 列（简单判断：查第一条记录是否有该字段）
-        try:
-            cursor.execute("SELECT user_id FROM users LIMIT 1")
-        except sqlite3.OperationalError:
-            # 说明表没有 user_id 列，需要添加
-            cursor.execute("ALTER TABLE users ADD COLUMN user_id TEXT UNIQUE")
-            conn.commit()
-
-        # 为没有 user_id 的用户分配 ID
-        cursor.execute("SELECT username FROM users WHERE user_id IS NULL OR user_id = ''")
-        rows = cursor.fetchall()
-        for (username,) in rows:
-            new_id = generate_unique_user_id(cursor)
-            cursor.execute("UPDATE users SET user_id = ? WHERE username = ?", (new_id, username))
-            print(f"[LOG] 为老用户 {username} 分配 ID: {new_id}")
 
         conn.commit()
         conn.close()
@@ -179,7 +155,7 @@ def save_message(sender, receiver, content, message_type):
     print(f"[LOG] save_message(sender={sender}, receiver={receiver}, type={message_type}) called")
     try:
         time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect("messages.db")
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO messages(sender, receiver, content, timestamp, message_type, delivered)
@@ -196,7 +172,7 @@ def save_message(sender, receiver, content, message_type):
 def get_offline_messages(username):
     print(f"[LOG] get_offline_messages(username={username}) called")
     try:
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect("messages.db")
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, sender, receiver, content, timestamp, message_type
@@ -218,7 +194,7 @@ def mark_messages_delivered(ids):
         print("[LOG] mark_messages_delivered: no ids, skipped")
         return
     try:
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect("messages.db")
         cursor = conn.cursor()
         cursor.executemany(
             "UPDATE messages SET delivered=1 WHERE id=?",
@@ -234,7 +210,7 @@ def get_full_history(username):
     """用户相关历史（含私聊、群聊）"""
     print(f"[LOG] get_full_history(username={username}) called")
     try:
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect("messages.db")
         cursor = conn.cursor()
         cursor.execute("""
             SELECT sender, receiver, content, timestamp, message_type

@@ -1,8 +1,10 @@
 import sys
 import asyncio
 import websockets
+import os
 from PyQt6.QtWidgets import QApplication, QMessageBox, QInputDialog
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import QSettings, Qt, QMetaObject, Q_ARG
+from PyQt6.QtGui import QIcon
 from qasync import QEventLoop, asyncSlot
 from client import ChatClient
 from login_ui import LoginWindow
@@ -14,6 +16,13 @@ class ClientApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
 
+        icon_path = "../logo/logo.ico"
+        if os.path.exists(icon_path):
+            icon = QIcon(icon_path)
+            self.app.setWindowIcon(icon)
+        else:
+            print(f"[WARN] Icon file not found: {icon_path}")
+        
         # 获取服务器地址
         host, ok = QInputDialog.getText(None, "服务器 IP", "请输入服务器 IP:")
         if not ok or not host:
@@ -182,6 +191,29 @@ class ClientApp:
             else:
                 QMessageBox.warning(self.chat_ui, "提示", "群ID无效")
 
+        # main.py - 在 send_message 函数内
+        elif msg_type == "add_friend":
+            to_user = msg_dict.get("to")
+            if to_user and isinstance(to_user, str):
+                asyncio.create_task(self.client.add_friend(to_user))
+            else:
+                print("[ERROR] Invalid add_friend message:", msg_dict)
+        
+        elif msg_type == "delete_friend":
+            to_user = msg_dict.get("to")
+            if to_user and isinstance(to_user, str):
+                asyncio.create_task(self.client.delete_friend(to_user))
+            else:
+                print("[ERROR] Invalid delete_friend message:", msg_dict)
+
+        # === 新增：接受好友请求 ===
+        elif msg_type == "accept_friend":
+            requester = msg_dict.get("from")
+            if requester and isinstance(requester, str):
+                asyncio.create_task(self.client.accept_friend(requester))
+            else:
+                print("[ERROR] Invalid accept_friend message:", msg_dict)
+            
         elif msg_type == "private":
             to_user = msg_dict.get("to")
             text = msg_dict.get("text")
@@ -201,8 +233,15 @@ class ClientApp:
     # 消息接收处理（UI 更新）
     # ============================================================
     def on_server_msg(self, msg):
+        """从 asyncio 线程调用，必须切回主线程"""
         if self.chat_ui:
-            self.chat_ui.handle_server_message(msg)
+            # 使用 QueuedConnection 确保跨线程安全
+            QMetaObject.invokeMethod(
+                self.chat_ui,
+                "handle_server_message_safely",
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(dict, msg)
+            )
 
     # ============================================================
     # 启动（强化 loop 策略）

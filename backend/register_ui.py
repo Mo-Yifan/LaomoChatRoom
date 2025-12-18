@@ -2,8 +2,9 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton,
     QGraphicsDropShadowEffect, QMessageBox
 )
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtGui import QFont, QColor, QIcon
 from PyQt6.QtCore import Qt, pyqtSignal
+import os
 
 
 class RegisterWindow(QWidget):
@@ -11,7 +12,7 @@ class RegisterWindow(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("用户注册")
+        self.setWindowTitle("老莫聊天室-注册")
         self.resize(420, 380)
 
         # 背景渐变
@@ -24,6 +25,13 @@ class RegisterWindow(QWidget):
             }
         """)
 
+        icon_path = "../logo/logo.ico"
+        if os.path.exists(icon_path):
+            icon = QIcon(icon_path)
+            self.setWindowIcon(icon)
+        else:
+            print(f"[WARN] Icon file not found: {icon_path}")
+        
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 

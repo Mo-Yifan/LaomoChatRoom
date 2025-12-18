@@ -2,10 +2,11 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
     QPushButton, QGraphicsDropShadowEffect, QCompleter
 )
-from PyQt6.QtGui import QFont, QColor, QCursor
+from PyQt6.QtGui import QFont, QColor, QCursor, QIcon
 from PyQt6.QtCore import Qt, pyqtSignal, QSettings, QEvent
 import sys
 import asyncio
+import os
 
 class LoginWindow(QWidget):
     login_request = pyqtSignal(str, str)       # 发给 client.py 主程序
@@ -24,6 +25,13 @@ class LoginWindow(QWidget):
                 );
             }
         """)
+
+        icon_path = "../logo/logo.ico"
+        if os.path.exists(icon_path):
+            icon = QIcon(icon_path)
+            self.setWindowIcon(icon)
+        else:
+            print(f"[WARN] Icon file not found: {icon_path}")
 
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)

@@ -10,10 +10,27 @@ from typing import Dict
 from datetime import datetime
 import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import os
 import websockets
+import random
 
 app = FastAPI()
+
+# ============================================================
+# 静态文件服务 + 根路径重定向（新增）
+# ============================================================
+# 挂载 web 目录（注意路径）
+if os.path.exists("../web"):
+    app.mount("/web", StaticFiles(directory="../web"), name="web")
+
+@app.get("/")
+async def root():
+    return RedirectResponse(url="/web/chat.html")  # ← 现在 /web 是有效的
+# ============================================================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,8 +38,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-import random
 
 # ============================================================
 # 生成唯一用户 ID 的辅助函数
@@ -50,6 +65,22 @@ def generate_unique_group_id(cursor, max_attempts=100):
     raise RuntimeError("无法生成唯一群ID（尝试次数过多）")
 
 # ============================================================
+# 用户存在性检查函数
+# ============================================================
+def user_exists(username: str) -> bool:
+    """检查用户是否存在"""
+    try:
+        conn = sqlite3.connect("../data/users.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM users WHERE username = ?", (username,))
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
+    except Exception as e:
+        print(f"[ERROR] user_exists failed: {e}")
+        return False
+
+# ============================================================
 # 数据库初始化
 # ============================================================
 def init_db():
@@ -63,6 +94,25 @@ def init_db():
                 user_id TEXT UNIQUE NOT NULL,
                 password TEXT NOT NULL,
                 last_online TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS friends (
+                user1 TEXT NOT NULL,
+                user2 TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (user1, user2)
+            )
+        """)
+
+        # === 新增：好友请求表 ===
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS friend_requests (
+                from_user TEXT NOT NULL,
+                to_user TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (from_user, to_user)
             )
         """)
 
@@ -304,7 +354,7 @@ def get_user_groups(username: str):
         conn = sqlite3.connect("../data/groups.db")
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT g.group_id, g.group_name
+            SELECT g.group_id, g.group_name, g.creator, g.created_at
             FROM group_members gm
             JOIN groups g ON gm.group_id = g.group_id
             WHERE gm.username = ?
@@ -317,6 +367,175 @@ def get_user_groups(username: str):
         print(f"[LOG] get_user_groups failed: {e}")
         return []
 
+# ============================================================
+# 好友管理函数
+# ============================================================
+def add_friend(user_a: str, user_b: str) -> bool:
+    """添加好友关系（无向）"""
+    if user_a == user_b:
+        return False
+    
+    # 确保 user1 < user2，保证唯一存储
+    u1, u2 = sorted([user_a, user_b])
+    
+    try:
+        conn = sqlite3.connect("../data/users.db")
+        cursor = conn.cursor()
+        now = datetime.now().isoformat(timespec="seconds")
+        cursor.execute(
+            "INSERT OR IGNORE INTO friends (user1, user2, created_at) VALUES (?, ?, ?)",
+            (u1, u2, now)
+        )
+        conn.commit()
+        success = cursor.rowcount > 0
+        conn.close()
+        return success
+    except Exception as e:
+        print(f"[ERROR] add_friend failed: {e}")
+        return False
+
+
+def are_friends(user_a: str, user_b: str) -> bool:
+    """判断两人是否为好友"""
+    if user_a == user_b:
+        return True  # 自己和自己算“好友”（方便逻辑）
+    u1, u2 = sorted([user_a, user_b])
+    try:
+        conn = sqlite3.connect("../data/users.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM friends WHERE user1 = ? AND user2 = ?", (u1, u2))
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
+    except Exception as e:
+        return False
+
+
+def get_friends_list(username: str) -> list:
+    """获取某用户的所有好友列表"""
+    try:
+        conn = sqlite3.connect("../data/users.db")
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user2 FROM friends WHERE user1 = ?
+            UNION
+            SELECT user1 FROM friends WHERE user2 = ?
+        """, (username, username))
+        friends = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return friends
+    except Exception as e:
+        print(f"[ERROR] get_friends_list failed: {e}")
+        return []
+
+def create_friend_request(sender: str, receiver: str) -> bool:
+    """创建好友请求"""
+    print(f"[DB DEBUG] create_friend_request called with:")
+    print(f"  sender = {repr(sender)}")
+    print(f"  receiver = {repr(receiver)}")
+    print(f"  sender == receiver? {sender == receiver}")
+    try:
+        conn = sqlite3.connect("../data/users.db")
+        cursor = conn.cursor()
+        now = datetime.now().isoformat(timespec="seconds")
+        print(f"[DB DEBUG] Executing INSERT INTO friend_requests...")
+        cursor.execute(
+            "INSERT OR IGNORE INTO friend_requests (from_user, to_user, created_at) VALUES (?, ?, ?)",
+            (sender, receiver, now)
+        )
+        conn.commit()
+        success = cursor.rowcount > 0
+        print(f"[DB DEBUG] INSERT rowcount = {cursor.rowcount}")
+        conn.close()
+        return success
+    except Exception as e:
+        print(f"[ERROR] create_friend_request failed: {e}")
+        return False
+
+
+def has_pending_request(sender: str, receiver: str) -> bool:
+    """检查是否存在待处理的请求（sender → receiver）"""
+    try:
+        print("[DEBUG] has_pending_request called")
+        conn = sqlite3.connect("../data/users.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM friend_requests WHERE from_user = ? AND to_user = ?",
+            (sender, receiver)
+        )
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
+    except Exception as e:
+        print(f"[ERROR] has_pending_request failed: {e}")
+        return False
+
+
+def accept_friend_request(sender: str, receiver: str) -> bool:
+    """接受好友请求：建立好友关系 + 删除请求"""
+    try:
+        conn = sqlite3.connect("../data/users.db")
+        cursor = conn.cursor()
+
+        # 检查请求是否存在
+        cursor.execute(
+            "SELECT 1 FROM friend_requests WHERE from_user = ? AND to_user = ?",
+            (sender, receiver)
+        )
+        if not cursor.fetchone():
+            conn.close()
+            return False
+
+        # 建立双向好友关系（使用你已有的 add_friend）
+        add_friend(sender, receiver)
+
+        # 删除请求
+        cursor.execute(
+            "DELETE FROM friend_requests WHERE from_user = ? AND to_user = ?",
+            (sender, receiver)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[ERROR] accept_friend_request failed: {e}")
+        return False
+
+def get_pending_friend_requests(to_user: str) -> list:
+    """获取某用户的所有待处理好友请求（返回 from_user 列表）"""
+    try:
+        conn = sqlite3.connect("../data/users.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT from_user FROM friend_requests WHERE to_user = ?",
+            (to_user,)
+        )
+        requests = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return requests
+    except Exception as e:
+        print(f"[ERROR] get_pending_friend_requests failed: {e}")
+        return []
+
+def delete_friend(user_a: str, user_b: str) -> bool:
+    """删除好友关系（无向）"""
+    if user_a == user_b:
+        return False
+    u1, u2 = sorted([user_a, user_b])
+    try:
+        conn = sqlite3.connect("../data/users.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM friends WHERE user1 = ? AND user2 = ?",
+            (u1, u2)
+        )
+        success = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return success
+    except Exception as e:
+        print(f"[ERROR] delete_friend failed: {e}")
+        return False
 # ============================================================
 # 消息存储（所有消息都存 message_type）（保持不变）
 # ============================================================
@@ -551,14 +770,32 @@ class ConnectionManager:
                 await self.send_json(username, safe_msg)
 
             # 3. 【关键新增】获取并推送用户所属群组！
-            groups = get_user_groups(username)  # 返回 [(group_id, group_name), ...]
-            my_groups = [{"id": gid, "name": gname} for (gid, gname) in groups]
-            await self.send_json(username, {
-                "type": "my_groups",
-                "groups": my_groups
-            })
+            groups = get_user_groups(username)
+            my_groups = [
+                {"id": gid, "name": gname, "creator": creator, "created_at": created_at}
+                for (gid, gname, creator, created_at) in groups
+            ]
+            await self.send_json(username, {"type": "my_groups", "groups": my_groups})
 
-            # 4. 广播上线通知（使用已有的 broadcast）
+            # 4. 【新增】获取并推送用户的好友列表！
+            friends = get_friends_list(username)  # ← 返回 ["user1", "user2", ...]
+            await self.send_json(username, {
+                "type": "my_friends",
+                "friends": friends
+            })
+            
+            # 5.【新增】推送所有未处理的好友请求
+            pending_requesters = get_pending_friend_requests(username)
+            for requester in pending_requesters:
+                await self.send_json(username, {
+                    "type": "friend_request",
+                    "from": requester,
+                    "text": f"{requester} 请求与你成为好友",
+                    "options": ["Y", "N"],
+                    "timestamp": datetime.now().isoformat()
+                })
+            
+            # 6. 广播上线通知（使用已有的 broadcast）
             system_msg = {
                 "type": "system",
                 "event": "user_online",
@@ -571,6 +808,7 @@ class ConnectionManager:
             online_usernames = list(manager.active_connections.keys())
             await self.send_json(username, {
                 "type": "online_users",
+                "users": online_usernames,
                 "usernames": online_usernames
             })
             
@@ -679,7 +917,10 @@ async def api_login(req: Request):
             groups = get_user_groups(real_username)  # 返回 [(group_id, group_name), ...]
 
             # 转换为字典列表
-            my_groups = [{"id": gid, "name": gname} for (gid, gname) in groups]
+            my_groups = [
+                {"id": gid, "name": gname, "creator": creator, "created_at": created_at}
+                for (gid, gname, creator, created_at) in groups
+            ]
 
             return {
                 "status": "ok",
@@ -695,17 +936,18 @@ async def api_login(req: Request):
 
 @app.get("/all_users")
 async def get_all_users():
-    print("[LOG] GET /all_users called")
     try:
         conn = sqlite3.connect("../data/users.db")
         cursor = conn.cursor()
-        cursor.execute("SELECT username, last_online FROM users ORDER BY username")
+        cursor.execute("SELECT username, user_id, last_online FROM users ORDER BY username")
         rows = cursor.fetchall()
         conn.close()
-        users = [{"username": row[0], "last_online": row[1]} for row in rows]
+        users = [
+            {"username": row[0], "user_id": row[1], "last_online": row[2]}
+            for row in rows
+        ]
         return {"status": "ok", "users": users}
     except Exception as e:
-        print(f"[LOG] /all_users error: {e}")
         return {"status": "fail", "reason": str(e)}
 
 # ============================================================
@@ -833,15 +1075,30 @@ async def authenticated_message_loop(websocket: WebSocket, username: str):
                 if not group_id or not group_id.startswith("G"):
                     await websocket.send_text(json.dumps({"type": "error", "text": "无效群ID"}))
                     continue
+
+                # 【新增】先获取群名
+                conn = sqlite3.connect("../data/groups.db")
+                cursor = conn.cursor()
+                cursor.execute("SELECT group_name FROM groups WHERE group_id = ?", (group_id,))
+                row = cursor.fetchone()
+                conn.close()
+
+                if not row:
+                    await websocket.send_text(json.dumps({"type": "error", "text": "群不存在"}))
+                    continue
+
+                group_name = row[0]
+
                 if join_group(username, group_id):
                     await websocket.send_text(json.dumps({
                         "type": "group_joined",
-                        "group_id": group_id
+                        "group_id": group_id,
+                        "group_name": group_name  # ←【关键】返回群名！
                     }))
-                    print(f"[LOG] {username} joined group {group_id}")
+                    print(f"[LOG] {username} joined group {group_id} ({group_name})")
                 else:
-                    await websocket.send_text(json.dumps({"type": "error", "text": "加入群组失败（群不存在或已加入）"}))
-
+                    await websocket.send_text(json.dumps({"type": "error", "text": "加入群组失败（可能已加入）"}))
+        
             # ===== 新增：退出群组 =====
             elif msg_type == "leave_group":
                 group_id = msg.get("group_id", "").strip()
@@ -854,12 +1111,114 @@ async def authenticated_message_loop(websocket: WebSocket, username: str):
                 else:
                     await websocket.send_text(json.dumps({"type": "error", "text": "退出群组失败"}))
             
+            elif msg_type == "add_friend":
+                target = msg.get("to", "").strip()
+                if not target:
+                    await websocket.send_text(json.dumps({"type": "error", "text": "目标用户不能为空"}))
+                    continue
+
+                if target == username:
+                    await websocket.send_text(json.dumps({"type": "error", "text": "不能添加自己为好友"}))
+                    continue
+
+                if not user_exists(target):
+                    await websocket.send_text(json.dumps({"type": "error", "text": "用户不存在"}))
+                    continue
+
+                # 检查是否已是好友
+                if are_friends(username, target):
+                    await websocket.send_text(json.dumps({"type": "error", "text": "你们已经是好友"}))
+                    continue
+
+                # 检查是否已发送过请求
+                if has_pending_request(username, target):
+                    await websocket.send_text(json.dumps({"type": "error", "text": "已发送过好友请求，请等待对方处理"}))
+                    continue
+
+                # 创建请求
+                if create_friend_request(username, target):
+                    # 通知请求方
+                    await websocket.send_text(json.dumps({
+                        "type": "system",
+                        "text": f"好友请求已发送给 {target}"
+                    }))
+                    
+                    # ===== 新增调试代码 =====
+                    print(f"[PUSH DEBUG] 尝试向 '{target}' 推送 friend_request")
+                    print(f"[PUSH DEBUG] 当前在线用户: {list(manager.active_connections.keys())}")
+                    print(f"[PUSH DEBUG] '{target}' 是否在线: {target in manager.active_connections}")
+
+                    # 通知接收方（关键！）
+                    request_msg = {
+                        "type": "friend_request",
+                        "from": username,
+                        "text": f"{username} 请求与你成为好友",
+                        "options": ["Y", "N"],
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    await manager.send_json(target, request_msg)
+                    print(f"[LOG] Friend request: {username} → {target}")
+                else:
+                    await websocket.send_text(json.dumps({"type": "error", "text": "发送好友请求失败"}))
+
+            elif msg_type == "accept_friend":
+                requester = msg.get("from", "").strip()
+                if not requester:
+                    print("[WARN] accept_friend missing 'from'")
+                    continue
+
+                if accept_friend_request(requester, username):
+                    # 通知双方
+                    success_text = f"你和 {requester} 现在是好友了！"
+                    await manager.send_json(username, {"type": "system", "text": success_text})
+                    await manager.send_json(requester, {"type": "system", "text": success_text})
+
+                    # 推送更新后的好友列表
+                    for user in [username, requester]:
+                        friends = get_friends_list(user)
+                        await manager.send_json(user, {
+                            "type": "my_friends",
+                            "friends": friends
+                        })
+                    print(f"[LOG] Friend accepted: {requester} ↔ {username}")
+                else:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "text": "无效或已过期的好友请求"
+                    }))
+
+            # ===== 新增：删除好友 =====
+            elif msg_type == "delete_friend":
+                target = msg.get("to", "").strip()
+                if not target:
+                    print("[WARN] delete_friend missing 'to'")
+                    continue
+                if delete_friend(username, target):
+                    # 通知双方
+                    success_text = f"你和 {target} 已解除好友关系"
+                    await manager.send_json(username, {"type": "system", "text": success_text})
+                    await manager.send_json(target, {"type": "system", "text": success_text})
+                    # 推送更新后的好友列表
+                    for user in [username, target]:
+                        friends = get_friends_list(user)
+                        await manager.send_json(user, {
+                            "type": "my_friends",
+                            "friends": friends
+                        })
+                    print(f"[LOG] Friend deleted: {username} ↔ {target}")
+                else:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "text": "删除好友失败（可能不是好友）"
+                    }))
+            
             elif msg_type == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
                 print(f"[LOG] Ping from {username} replied")
             
             else:
                 print(f"[LOG] Unknown message type from {username}: {msg_type}")
+            
     except WebSocketDisconnect:
         manager.disconnect(username)
         await manager.broadcast(make_message(

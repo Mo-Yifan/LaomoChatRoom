@@ -111,6 +111,28 @@ class ChatClient:
             "group_id": group_id
         })
 
+    # client.py - Client class
+    async def add_friend(self, to: str):
+        """发送加好友请求"""
+        await self.send_packet({
+            "type": "add_friend",
+            "to": to
+        })
+    
+    async def accept_friend(self, requester: str):
+        """接受好友请求"""
+        await self.send_packet({
+            "type": "accept_friend",
+            "from": requester
+        })
+
+    async def delete_friend(self, to: str):
+        """发送删除好友请求"""
+        await self.send_packet({
+            "type": "delete_friend",
+            "to": to
+        })
+
     # -----------------------------
     # 发送
     # -----------------------------

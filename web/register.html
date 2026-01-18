@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>老莫聊天室 - 注册</title>
+    <style>
+        /* ========== 复用 login.html 的全局和容器样式 ========== */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: "Microsoft YaHei", sans-serif;
+        }
+        body {
+            background: linear-gradient(135deg, #ff9a9e, #fad0c4);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background-color: white;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            width: 100%;
+            max-width: 400px;
+            padding: 40px 30px;
+            text-align: center;
+        }
+        .container h1 {
+            color: #ff6f61;
+            margin-bottom: 30px;
+            font-size: 28px;
+        }
+        .input-group {
+            margin-bottom: 20px;
+            text-align: left;
+        }
+        .input-group input {
+            width: 100%;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            font-size: 16px;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+        .input-group input:focus {
+            border-color: #ff6f61;
+        }
+        .btn {
+            width: 100%;
+            padding: 15px;
+            border: none;
+            border-radius: 10px;
+            font-size: 18px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .btn-register {
+            background-color: #ff6f61;
+            color: white;
+            margin-bottom: 15px;
+        }
+        .btn-register:hover {
+            background-color: #e55a50;
+        }
+        .btn-login {
+            background-color: transparent;
+            color: #ff6f61;
+            text-decoration: underline;
+        }
+        @media (max-width: 480px) {
+            .container {
+                padding: 30px 20px;
+            }
+            .container h1 {
+                font-size: 24px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>用户注册</h1>
+        <form id="registerForm">
+            <div class="input-group">
+                <input type="text" id="regUsername" placeholder="用户名" required>
+            </div>
+            <div class="input-group">
+                <input type="password" id="regPassword" placeholder="密码" required>
+            </div>
+            <div class="input-group">
+                <input type="password" id="confirmPassword" placeholder="确认密码" required>
+            </div>
+            <button type="submit" class="btn btn-register">注册</button>
+        </form>
+        <button id="goToLogin" class="btn btn-login">已有账号？去登录</button>
+    </div>
+
+    <script>
+        document.getElementById('registerForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const username = document.getElementById('regUsername').value;
+            const password = document.getElementById('regPassword').value;
+            const confirmPassword = document.getElementById('confirmPassword').value;
+
+            if (password !== confirmPassword) {
+                alert('两次输入的密码不一致！');
+                return;
+            }
+
+            try {
+                const response = await fetch('/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await response.json();
+
+                if (data.status === 'ok') {
+                    alert(`注册成功！您的账号 ID 是：\n\n${data.user_id}\n\n请妥善保存！`);
+                    window.location.href = '/web/login.html';
+                } else {
+                    alert('注册失败: ' + data.reason);
+                }
+            } catch (error) {
+                console.error('注册请求出错:', error);
+                alert('网络错误，请稍后重试');
+            }
+        });
+
+        document.getElementById('goToLogin').addEventListener('click', () => {
+            window.location.href = '/web/login.html';
+        });
+    </script>
+</body>
+</html>
